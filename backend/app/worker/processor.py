@@ -39,27 +39,11 @@ def _prepare_data_sources(tenant_id, risk, entity, orion, conn, settings) -> Dic
     """Monta el dict de fuentes que el modelo consume, según risk.data_sources."""
     parcel_id = weather_source.resolve_parcel_id(entity)
     required = risk.get("data_sources") or []
+    ctx = sources.build_fetch_context(orion, conn, settings, tenant_id)
     data: Dict[str, Any] = {}
 
     for src in required:
-        if src == "weather" and parcel_id:
-            data["weather"] = sources.fetch_parcel_weather(
-                settings.orion_ld_url, tenant_id, parcel_id
-            )
-        elif src == "gdd" and parcel_id:
-            season_start = (risk.get("model_config") or {}).get("season_start_doy", 1)
-            data["gdd"] = sources.fetch_season_gdd(conn, tenant_id, parcel_id, season_start)
-        elif src == "soil" and parcel_id:
-            data["soil"] = sources.fetch_parcel_soil(orion, parcel_id)
-        elif src == "ndvi" and parcel_id:
-            data["ndvi"] = sources.fetch_parcel_ndvi(orion, parcel_id)
-        elif src == "crop_health" and parcel_id:
-            data["crop_health"] = sources.fetch_parcel_crop_health(orion, parcel_id)
-        elif src == "weather_alerts" and parcel_id:
-            data["weather_alerts"] = sources.fetch_weather_alerts(
-                settings.weather_api_url, tenant_id, parcel_id
-            )
-        elif src == "telemetry":
+        if src == "telemetry":
             entity_id = entity.get("id", "")
             etype = entity.get("type", "")
             if "Device" in etype or "Vehicle" in etype:
@@ -69,6 +53,10 @@ def _prepare_data_sources(tenant_id, risk, entity, orion, conn, settings) -> Dic
                     if val:
                         data["telemetry"] = val
                         break
+            continue
+        fetcher = sources.SOURCE_FETCHERS.get(src)
+        if fetcher and parcel_id:
+            data[src] = fetcher(ctx, parcel_id, risk)
     return data
 
 
@@ -188,7 +176,8 @@ def evaluate_risks_for_tenant(conn, tenant_id: str) -> Dict[str, int]:
                     score = float(result.get("probability_score", 0.0))
                     if score < PUBLISH_THRESHOLD:
                         continue
-                    severity = severity_for_score(score)
+                    severity = result.get("severity") or severity_for_score(score)
+                    sev_str = severity if isinstance(severity, str) else severity.value
                     if publish_alert(
                         orion_ld_url=settings.orion_ld_url,
                         context_url=settings.context_url,
@@ -204,7 +193,7 @@ def evaluate_risks_for_tenant(conn, tenant_id: str) -> Dict[str, int]:
                     ):
                         evaluated += 1
                         try:
-                            _dispatch_alert(tenant_id, risk["alert_type"], severity.value, entity_id)
+                            _dispatch_alert(tenant_id, risk["alert_type"], sev_str, entity_id)
                         except Exception as e:
                             logger.warning("dispatch failed for %s/%s: %s", risk["alert_type"], entity_id, e)
                     else:

@@ -20,6 +20,7 @@ try:
     from .water_stress_model import WaterStressRiskModel
     from .gdd_pest_model import GDDPestRiskModel
     from .weather_alert_model import WeatherAlertRiskModel
+    from .threshold_model import ThresholdRiskModel
 except ImportError as e:
     logger.warning(f"Failed to import risk models: {e}")
     AgronomicRiskModel = None
@@ -31,6 +32,7 @@ except ImportError as e:
     WaterStressRiskModel = None
     GDDPestRiskModel = None
     WeatherAlertRiskModel = None
+    ThresholdRiskModel = None
 
 # Models dispatched by model_type (takes precedence over domain mapping)
 MODEL_TYPE_MAP = {
@@ -40,6 +42,7 @@ MODEL_TYPE_MAP = {
     'water_stress': WaterStressRiskModel,
     'gdd_pest': GDDPestRiskModel,
     'weather_alert': WeatherAlertRiskModel,
+    'threshold': ThresholdRiskModel,
 }
 
 # Fallback dispatch by risk_domain

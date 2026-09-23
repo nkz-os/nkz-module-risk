@@ -147,3 +147,56 @@ def fetch_telemetry(conn, tenant_id: str, device_id: str, metric_name: str, hour
     except Exception as e:
         logger.error("telemetry fetch failed for %s/%s: %s", tenant_id, device_id, e)
         return None
+
+
+# ── Registry de fuentes por parcela ────────────────────────────────────
+# Cada entrada es un callable (ctx, parcel_id, risk) -> data. Añadir una fuente
+# nueva = añadir una entrada aquí (no hay que tocar processor.py).
+def build_fetch_context(orion, conn, settings, tenant_id: str) -> dict:
+    return {"orion": orion, "conn": conn, "settings": settings, "tenant_id": tenant_id}
+
+
+SOURCE_FETCHERS = {
+    "weather": lambda ctx, pid, risk: fetch_parcel_weather(
+        ctx["settings"].orion_ld_url, ctx["tenant_id"], pid
+    ),
+    "gdd": lambda ctx, pid, risk: fetch_season_gdd(
+        ctx["conn"], ctx["tenant_id"], pid,
+        (risk.get("model_config") or {}).get("season_start_doy", 1),
+    ),
+    "soil": lambda ctx, pid, risk: fetch_parcel_soil(ctx["orion"], pid),
+    "ndvi": lambda ctx, pid, risk: fetch_parcel_ndvi(ctx["orion"], pid),
+    "crop_health": lambda ctx, pid, risk: fetch_parcel_crop_health(ctx["orion"], pid),
+    "weather_alerts": lambda ctx, pid, risk: fetch_weather_alerts(
+        ctx["settings"].weather_api_url, ctx["tenant_id"], pid
+    ),
+}
+
+
+# ── Catálogo de fuentes (para la UI: autocompletado de atributos) ──────
+SOURCE_CATALOG = {
+    "weather": {
+        "label": "Meteorología",
+        "attributes": [
+            "temp_min", "temp_max", "temp_avg", "humidity", "precip_mm",
+            "wind_speed_ms", "wind_direction_deg", "eto_mm", "solar_rad_w_m2",
+            "pressure_hpa", "soil_moisture_0_10cm", "soil_moisture_10_40cm",
+            "gdd_accumulated",
+        ],
+    },
+    "soil": {
+        "label": "Suelo",
+        "attributes": ["texture", "awc", "field_capacity", "wilting_point"],
+    },
+    "ndvi": {"label": "Vegetación (índice)", "attributes": ["ndvi", "savi"]},
+    "crop_health": {
+        "label": "Salud de cultivo",
+        "attributes": [
+            "cwsi", "compaction_risk_score", "soil_water_ratio",
+            "vhi", "vci", "gdd_accumulated",
+        ],
+    },
+    "gdd": {"label": "Grados-día", "attributes": ["gdd_season_total", "days_accumulated"]},
+    "weather_alerts": {"label": "Avisos meteorológicos", "attributes": []},
+    "telemetry": {"label": "Telemetría de dispositivo", "attributes": ["value"]},
+}
