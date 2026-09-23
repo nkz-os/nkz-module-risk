@@ -26,3 +26,4 @@ httpx>=0.26.0
 # Development
 black>=24.1.0
 ruff>=0.15.17
+requests>=2.31.0
