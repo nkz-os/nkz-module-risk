@@ -2,6 +2,40 @@
   "monitor": {
     "title": "Risk Alerts",
     "loading": "Loading…",
-    "empty": "No active alerts."
+    "empty": "No active alerts.",
+    "tab": "Monitor"
+  },
+  "title": {
+    "es": "Avisos de Riesgo",
+    "en": "Risk Alerts"
+  },
+  "config": {
+    "tab": "Configuration",
+    "loading": "Loading…",
+    "channels": "Delivery channels",
+    "email": "Email",
+    "email_to": "Recipient",
+    "push": "Push (mobile)",
+    "zulip": "Zulip",
+    "zulip_stream": "Stream",
+    "zulip_topic": "Topic",
+    "telegram": "Telegram",
+    "saving": "Saving…",
+    "save": "Save",
+    "subscriptions": "Alert subscriptions",
+    "empty": "No alert types",
+    "on": "On",
+    "off": "Off",
+    "threshold": "Threshold"
+  },
+  "integrations": {
+    "tab": "Integrations",
+    "new": "New webhook",
+    "name": "Name",
+    "url": "URL",
+    "secret_optional": "Secret (optional)",
+    "add": "Add",
+    "empty": "No webhooks",
+    "remove": "Remove"
   }
 }
