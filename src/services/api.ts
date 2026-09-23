@@ -47,6 +47,25 @@ export interface Webhook {
   min_severity: string;
 }
 
+export interface SourceCatalog {
+  [source: string]: { label: string; attributes: string[] };
+}
+
+export interface RiskCondition {
+  source: string;
+  attribute: string;
+  operator: string;
+  value: number | string | (number | string)[];
+  unit?: string | null;
+  duration_minutes?: number;
+  severity?: string;
+}
+
+export interface RiskConditionGroup {
+  logical_operator?: string;
+  conditions: (RiskCondition | RiskConditionGroup)[];
+}
+
 export function useModuleApi() {
   const { getToken, getTenantId } = useAuth();
 
@@ -67,5 +86,7 @@ export function useModuleApi() {
     getWebhooks: () => client.get<Webhook[]>('/webhooks'),
     createWebhook: (d: { name: string; url: string; secret?: string; min_severity: string }) => client.post<Webhook>('/webhooks', d),
     deleteWebhook: (id: string) => client.delete<void>(`/webhooks/${id}`),
+    getCatalogSources: () => client.get<SourceCatalog>('/catalog/sources'),
+    createCustomRisk: (d: { name: string; description?: string; category?: string; target_sdm_type?: string; data_sources: string[]; conditions: RiskConditionGroup }) => client.post<{ alert_type: string }>('/catalog/custom', d),
   };
 }

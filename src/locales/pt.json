@@ -37,5 +37,14 @@
     "add": "Add",
     "empty": "No webhooks",
     "remove": "Remove"
+  },
+  "custom": {
+    "tab": "Custom",
+    "created": "Risk created",
+    "name": "Risk name",
+    "description": "Description",
+    "logic": "Logic",
+    "condition": "Add condition",
+    "create": "Create risk"
   }
 }

@@ -46,5 +46,14 @@
     "add": "Añadir",
     "empty": "Sin webhooks",
     "remove": "Eliminar"
+  },
+  "custom": {
+    "tab": "Custom",
+    "created": "Riesgo creado",
+    "name": "Nombre del riesgo",
+    "description": "Descripción",
+    "logic": "Lógica",
+    "condition": "Añadir condición",
+    "create": "Crear riesgo"
   }
 }

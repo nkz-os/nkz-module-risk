@@ -6,6 +6,7 @@ import { useTranslation } from 'react-i18next';
 import { useModuleApi, AlertItem, CatalogItem } from './services/api';
 import ConfigTab from './components/ConfigTab';
 import IntegrationsTab from './components/IntegrationsTab';
+import CustomTab from './components/CustomTab';
 
 const SEV: Record<string, string> = {
   critical: 'bg-nkz-danger-soft text-nkz-danger-strong',
@@ -22,6 +23,7 @@ const val = (x: unknown): unknown =>
 const TABS = [
   { id: 'monitor', label: 'monitor.tab' },
   { id: 'config', label: 'config.tab' },
+  { id: 'custom', label: 'custom.tab' },
   { id: 'integrations', label: 'integrations.tab' },
 ] as const;
 
@@ -99,6 +101,7 @@ const App: React.FC = () => {
 
       {tab === 'monitor' && <Monitor />}
       {tab === 'config' && <ConfigTab />}
+      {tab === 'custom' && <CustomTab />}
       {tab === 'integrations' && <IntegrationsTab />}
     </div>
   );
