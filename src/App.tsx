@@ -1,30 +1,76 @@
 /**
- * Main page component for this module — lazily loaded as `MainPage` by
- * moduleEntry.ts's `defineModule({ main: MainPage })`. Part of the
- * production bundle (not a dev-only shell); also rendered standalone by
- * `npm run dev` via src/main.tsx.
- *
- * Replace the body with your real UI.
+ * Risk module main page — Monitor (read-only list of active Alert entities).
  */
-import React from 'react';
-import './index.css';
+import React, { useEffect, useState } from 'react';
+import { useTranslation } from 'react-i18next';
+import { useModuleApi, AlertItem, CatalogItem } from './services/api';
+
+const SEV: Record<string, string> = {
+  critical: 'bg-nkz-danger-soft text-nkz-danger-strong',
+  high: 'bg-orange-100 text-orange-800',
+  medium: 'bg-nkz-warning-soft text-nkz-warning-strong',
+  low: 'bg-nkz-bg-secondary text-nkz-muted',
+};
+
+// NGSI-LD normalized value → plain value (keyValues vs normalized).
+const val = (x: unknown): unknown =>
+  x && typeof x === 'object' && 'value' in (x as Record<string, unknown>)
+    ? (x as { value: unknown }).value
+    : x;
 
 const App: React.FC = () => {
+  const { t } = useTranslation('risk');
+  const api = useModuleApi();
+  const [alerts, setAlerts] = useState<AlertItem[]>([]);
+  const [catalog, setCatalog] = useState<Map<string, CatalogItem>>(new Map());
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const [a, c] = await Promise.all([api.getAlerts(), api.getCatalog()]);
+        setAlerts(a.alerts ?? []);
+        setCatalog(new Map(c.map((x) => [x.alert_type, x])));
+      } catch {
+        // keep empty state on error
+      } finally {
+        setLoading(false);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
   return (
-    <div className="w-full min-h-screen bg-gray-50 flex items-center justify-center">
-      <div className="bg-white rounded-lg shadow p-8 max-w-md w-full">
-        <h1 className="text-2xl font-bold text-gray-900 mb-2">Risk</h1>
-        <p className="text-sm text-gray-500 mb-4">
-          Replace this page with your module's main UI.
-        </p>
-        <div className="bg-blue-50 border border-blue-200 rounded p-3 text-sm text-blue-800">
-          Run <code className="font-mono bg-blue-100 px-1 rounded">npm run build:module</code> to
-          produce <code className="font-mono bg-blue-100 px-1 rounded">dist/remoteEntry.js</code> +{' '}
-          <code className="font-mono bg-blue-100 px-1 rounded">dist/mf-manifest.json</code>, then
-          upload the whole <code className="font-mono bg-blue-100 px-1 rounded">dist/</code> directory
-          to MinIO.
-        </div>
-      </div>
+    <div className="p-6 space-y-4 max-w-4xl">
+      <h1 className="text-2xl font-bold text-nkz-text">{t('monitor.title')}</h1>
+
+      {loading ? (
+        <p className="text-nkz-muted">{t('monitor.loading')}</p>
+      ) : alerts.length === 0 ? (
+        <p className="text-nkz-muted">{t('monitor.empty')}</p>
+      ) : (
+        <ul className="space-y-2">
+          {alerts.map((a) => {
+            const severity = String(val(a.severity) ?? 'low');
+            const alertType = String(val(a.alertType) ?? '');
+            const category = String(val(a.category) ?? '');
+            return (
+              <li
+                key={a.id}
+                className="flex items-center gap-3 rounded-lg border border-nkz-border bg-white p-3"
+              >
+                <span className={`rounded-full px-2 py-0.5 text-xs font-medium ${SEV[severity] ?? SEV.low}`}>
+                  {severity}
+                </span>
+                <span className="font-medium text-nkz-text">
+                  {catalog.get(alertType)?.name ?? alertType}
+                </span>
+                <span className="text-xs text-nkz-muted">{category}</span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
     </div>
   );
 };

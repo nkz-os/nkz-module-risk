@@ -7,5 +7,10 @@
     "user": "Usuario",
     "refresh": "Actualizar",
     "replaceHint": "Sustituye este componente por la funcionalidad de tu módulo."
+  },
+  "monitor": {
+    "title": "Avisos de Riesgo",
+    "loading": "Cargando…",
+    "empty": "Sin avisos activos."
   }
 }

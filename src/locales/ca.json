@@ -1,1 +1,7 @@
-{}
+{
+  "monitor": {
+    "title": "Risk Alerts",
+    "loading": "Loading…",
+    "empty": "No active alerts."
+  }
+}

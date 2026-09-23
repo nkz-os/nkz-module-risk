@@ -7,5 +7,10 @@
     "user": "User",
     "refresh": "Refresh",
     "replaceHint": "Replace this component with your module's functionality."
+  },
+  "monitor": {
+    "title": "Risk Alerts",
+    "loading": "Loading…",
+    "empty": "No active alerts."
   }
 }
