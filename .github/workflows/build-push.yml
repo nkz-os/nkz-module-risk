@@ -86,7 +86,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Record API image digest
-        run: echo "risk-api digest: ${{ steps.build-api.outputs.digest }}"
+        run: 'echo "risk-api digest: ${{ steps.build-api.outputs.digest }}"'
 
   # ==========================================================================
   # Build and push Worker Docker image
@@ -137,7 +137,7 @@ jobs:
           cache-to: type=gha,mode=max
 
       - name: Record Worker image digest
-        run: echo "risk-worker digest: ${{ steps.build-worker.outputs.digest }}"
+        run: 'echo "risk-worker digest: ${{ steps.build-worker.outputs.digest }}"'
 
   # ==========================================================================
   # Publish frontend MF2 bundle (OIDC) — automatic on push to main
