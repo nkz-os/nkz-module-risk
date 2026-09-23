@@ -12,7 +12,8 @@ python-multipart>=0.0.32
 # X-Tenant-ID / X-User-ID / X-User-Roles headers (see app/middleware).
 nkz-platform-sdk>=0.6.4
 
-# Database (optional - uncomment if needed)
+# Database (metadata operativa del esquema risk.* — NO telemetría)
+psycopg2-binary>=2.9.9
 # sqlalchemy>=2.0.0
 # asyncpg>=0.29.0
 # alembic>=1.13.0

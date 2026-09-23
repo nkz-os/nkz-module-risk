@@ -8,8 +8,11 @@ CREATE TABLE IF NOT EXISTS risk.alert_catalog (
     alert_type   TEXT PRIMARY KEY,
     name         TEXT NOT NULL,
     description  TEXT,
-    category     TEXT NOT NULL,           -- weather|agronomic|robotic|energy|sensor|crop
+    category     TEXT NOT NULL,           -- weather|agronomic|robotic|energy|sensor|crop (== risk_domain)
     model_type   TEXT,                     -- frost|water_stress|gdd_pest|... (ver factory)
+    target_sdm_type TEXT NOT NULL DEFAULT 'AgriParcel',  -- tipo de entidad Orion a evaluar
+    data_sources JSONB NOT NULL DEFAULT '[]'::jsonb,     -- ['weather','gdd','telemetry','weather_alerts']
+    evaluation_mode TEXT NOT NULL DEFAULT 'batch',
     model_config JSONB NOT NULL DEFAULT '{}'::jsonb,
     severity_levels JSONB NOT NULL DEFAULT '{"critical":95,"high":80,"medium":60}'::jsonb,
     is_active    BOOLEAN NOT NULL DEFAULT true,

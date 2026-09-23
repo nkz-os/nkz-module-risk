@@ -33,6 +33,16 @@ class Settings(BaseSettings):
     # subscriptions. No hardcoded fallback: see require_postgres_url() below.
     postgres_url: str = ""
 
+    # Orion-LD + contexto (lectura/publicación de Alert). El SDK lee ORION_LD_URL
+    # por defecto; aquí se centraliza para pasarlo explícitamente al cliente.
+    orion_ld_url: str = "http://orion-ld-service:1026"
+    context_url: str = "http://api-gateway-service:5000/ngsi-ld-context.json"
+
+    # Servicios de canal (Fase 2 los usa el dispatcher; se declaran ya).
+    email_service_url: str = "http://email-service:5000"
+    push_service_url: str = "http://push-notification-service:5000"
+    zulip_service_url: str = "http://zulip-module-service:5000"
+
     # Redis (for caching/celery - optional)
     # redis_url: str = ""
 
