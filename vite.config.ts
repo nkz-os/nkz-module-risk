@@ -6,7 +6,6 @@ const MODULE_ID = 'risk';
 
 export default defineConfig(nkzModulePreset({
   moduleId: MODULE_ID,
-  entry: './src/moduleEntry.ts',
   viteConfig: {
     resolve: {
       alias: { '@': path.resolve(__dirname, './src') },
