@@ -59,6 +59,17 @@ def test_fetch_parcel_crop_health_fields():
     assert r["compaction_risk_score"] == 55
 
 
+def test_fetch_parcel_crop_health_skips_placeholder():
+    o = _orion([
+        {"id": "urn:x1", "type": "CropHealthAssessment",
+         "status": {"value": "pending"}, "provenance": {"value": "placeholder"}},
+        {"id": "urn:x2", "type": "CropHealthAssessment",
+         "overallSeverity": {"value": "CRITICAL"}, "cwsiValue": {"value": 0.8}},
+    ])
+    r = sources.fetch_parcel_crop_health(o, "urn:ngsi-ld:AgriParcel:abc")
+    assert r["overall_severity"] == "CRITICAL"
+
+
 def test_fetch_weather_alerts():
     with patch("app.worker.sources.requests.get") as get:
         get.return_value.status_code = 200

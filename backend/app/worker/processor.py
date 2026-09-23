@@ -124,6 +124,7 @@ def _evaluate_crop_stress(orion, tenant_id, settings) -> tuple[int, int]:
             except Exception as e:
                 logger.warning("crop dispatch failed for %s: %s", parcel_id, e)
         else:
+            logger.warning("crop publish failed for %s", parcel_id)
             errors += 1
     return evaluated, errors
 
@@ -207,6 +208,7 @@ def evaluate_risks_for_tenant(conn, tenant_id: str) -> Dict[str, int]:
                         except Exception as e:
                             logger.warning("dispatch failed for %s/%s: %s", risk["alert_type"], entity_id, e)
                     else:
+                        logger.warning("publish failed for %s/%s", risk["alert_type"], entity_id)
                         errors += 1
                 except Exception as e:
                     logger.error("eval %s/%s: %s", risk["alert_type"], entity_id, e)

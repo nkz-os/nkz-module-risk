@@ -80,22 +80,28 @@ def fetch_parcel_ndvi(orion, parcel_id: str) -> Optional[Dict[str, Any]]:
 
 
 def fetch_parcel_crop_health(orion, parcel_id: str) -> Optional[Dict[str, Any]]:
-    rows = query_by_parcel(orion, "CropHealthAssessment", parcel_id, limit=1)
-    if not rows:
-        return None
-    e = rows[0]
-    return {
-        "cwsi": _value(e, "cwsiValue"),
-        "overall_severity": _value(e, "overallSeverity"),
-        "recommended_action": _value(e, "recommendedAction"),
-        "compaction_risk_score": _value(e, "compactionRiskScore"),
-        "soil_water_mm": _value(e, "soilWaterMm"),
-        "soil_awc_mm": _value(e, "soilAWCmm"),
-        "soil_water_ratio": _value(e, "soilWaterRatio"),
-        "vhi": _value(e, "vhi"),
-        "vci": _value(e, "vci"),
-        "gdd_accumulated": _value(e, "gddAccumulated"),
-    }
+    rows = query_by_parcel(orion, "CropHealthAssessment", parcel_id, limit=10)
+    for e in rows:
+        # Saltar stubs placeholder (status=pending / provenance=placeholder) y
+        # entidades sin severidad: no son evaluaciones reales.
+        status = _value(e, "status")
+        if status and str(status).lower() == "pending":
+            continue
+        if _value(e, "overallSeverity") is None:
+            continue
+        return {
+            "cwsi": _value(e, "cwsiValue"),
+            "overall_severity": _value(e, "overallSeverity"),
+            "recommended_action": _value(e, "recommendedAction"),
+            "compaction_risk_score": _value(e, "compactionRiskScore"),
+            "soil_water_mm": _value(e, "soilWaterMm"),
+            "soil_awc_mm": _value(e, "soilAWCmm"),
+            "soil_water_ratio": _value(e, "soilWaterRatio"),
+            "vhi": _value(e, "vhi"),
+            "vci": _value(e, "vci"),
+            "gdd_accumulated": _value(e, "gddAccumulated"),
+        }
+    return None
 
 
 # ── Weather alerts (weather-api) ───────────────────────────────────────
