@@ -42,6 +42,7 @@ class Settings(BaseSettings):
     email_service_url: str = "http://email-service:5000"
     push_service_url: str = "http://push-notification-service:5000"
     zulip_service_url: str = "http://zulip-module-service:5000"
+    weather_api_url: str = "http://weather-api-service:8000"
 
     # Redis (for caching/celery - optional)
     # redis_url: str = ""
