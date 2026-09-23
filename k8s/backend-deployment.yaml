@@ -61,7 +61,7 @@ spec:
               valueFrom:
                 secretKeyRef:
                   name: internal-service-secret
-                  key: secret
+                  key: INTERNAL_SERVICE_SECRET
                   optional: true
           resources:
             requests:
