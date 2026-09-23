@@ -242,7 +242,7 @@ def main() -> None:
                 "SELECT DISTINCT tenant_id FROM tenants "
                 "WHERE status = 'active' AND tenant_id IS NOT NULL"
             )
-            tenants = [r[0] for r in cur.fetchall()]
+            tenants = [r["tenant_id"] for r in cur.fetchall()]
         for tenant_id in tenants:
             try:
                 result = evaluate_risks_for_tenant(conn, tenant_id)
