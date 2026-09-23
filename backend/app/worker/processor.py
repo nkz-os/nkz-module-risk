@@ -87,3 +87,30 @@ def evaluate_risks_for_tenant(conn, tenant_id: str) -> Dict[str, int]:
                     logger.error("eval %s/%s: %s", risk["alert_type"], entity_id, e)
                     errors += 1
     return {"evaluated": evaluated, "errors": errors}
+
+
+def main() -> None:
+    """CLI del worker (modo batch): evalúa todos los tenants activos una vez."""
+    from app.db import get_conn
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT tenant_id FROM tenants "
+                "WHERE status = 'active' AND tenant_id IS NOT NULL"
+            )
+            tenants = [r[0] for r in cur.fetchall()]
+        for tenant_id in tenants:
+            try:
+                result = evaluate_risks_for_tenant(conn, tenant_id)
+                logger.info("tenant=%s result=%s", tenant_id, result)
+            except Exception as e:
+                logger.error("tenant=%s failed: %s", tenant_id, e)
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    main()

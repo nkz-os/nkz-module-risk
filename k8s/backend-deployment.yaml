@@ -1,18 +1,16 @@
 # =============================================================================
-# Risk Backend Deployment
+# Risk Module — Backend API (nkz-module-risk)
 # =============================================================================
-# Backend API service for Risk module
+# Reference manifest. Production values (image digest/SHA, CORS, URLs) live in
+# gitops-config/overlays/modules/risk/ — this public repo carries placeholders.
 # =============================================================================
-
----
-# Deployment: Risk Backend Service
 apiVersion: apps/v1
 kind: Deployment
 metadata:
-  name: risk-backend
+  name: risk-module-api
   namespace: nekazari
   labels:
-    app: risk-backend
+    app: risk-module-api
     component: backend
     module: risk
     nekazari.io/profile: addon
@@ -20,59 +18,51 @@ spec:
   replicas: 1
   selector:
     matchLabels:
-      app: risk-backend
+      app: risk-module-api
   template:
     metadata:
       labels:
-        app: risk-backend
+        app: risk-module-api
         component: backend
         module: risk
     spec:
       containers:
         - name: backend
-          image: ghcr.io/YOUR_ORG/risk-backend:v1.0.0
-          imagePullPolicy: Always
+          image: ghcr.io/nkz-os/nkz-module-risk/risk-api@sha256:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
           ports:
             - name: http
               containerPort: 8000
           # Non-secret config (service URLs, CORS origins) belongs in a
-          # ConfigMap overlay in gitops-config/overlays/modules/risk/ —
-          # NOT in this public repo. `optional: true` so config.py's own
-          # defaults apply when the ConfigMap doesn't exist (e.g. local dev).
+          # ConfigMap overlay in gitops-config/overlays/modules/risk/ — NOT in
+          # this public repo. `optional: true` so config.py defaults apply when
+          # the ConfigMap doesn't exist.
           envFrom:
             - configMapRef:
                 name: risk-config
                 optional: true
           env:
-            - name: APP_NAME
-              value: "Risk"
-            - name: DEBUG
-              value: "false"
             - name: API_PREFIX
               value: "/api/risk"
-            # CORS — explicit origin whitelist (never *). This is a local
-            # placeholder; the production value lives in the ConfigMap overlay.
-            - name: CORS_ORIGINS
-              value: '["https://your-frontend-domain"]'
-            # Auth: this module trusts gateway-injected headers (X-Tenant-ID,
-            # X-User-ID, X-User-Roles) via nkz_platform_sdk.auth.require_auth —
-            # no Keycloak/JWT config needed here (see app/middleware).
-            # Internal service-to-service auth (/internal/* routes only) —
-            # shared K8s Secret, hmac.compare_digest verification.
+            - name: ORION_LD_URL
+              value: "http://orion-ld-service:1026"
+            - name: CONTEXT_URL
+              value: "http://api-gateway-service:5000/ngsi-ld-context.json"
+            # Database (MANDATORY — the module writes risk.* metadata). Fail-fast
+            # at startup if unset (app/config.py:require_postgres_url).
+            - name: POSTGRES_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-secret
+                  key: postgres-url
+            # Internal service-to-service auth (/internal/* routes only),
+            # hmac.compare_digest verification. Shared K8s secret.
             - name: INTERNAL_SERVICE_SECRET
               valueFrom:
                 secretKeyRef:
                   name: internal-service-secret
                   key: secret
                   optional: true
-          # Database (only if this module writes admin/metadata to PostgreSQL —
-          # NEVER for time-series/telemetry, which flows through Orion-LD
-          # subscriptions only. See app/config.py:require_postgres_url.)
-          # - name: POSTGRES_URL
-          #   valueFrom:
-          #     secretKeyRef:
-          #       name: postgresql-secret
-          #       key: connection-string
           resources:
             requests:
               memory: "128Mi"
@@ -94,16 +84,14 @@ spec:
             initialDelaySeconds: 5
             periodSeconds: 10
             timeoutSeconds: 3
-
 ---
-# Service: Risk Backend API
 apiVersion: v1
 kind: Service
 metadata:
-  name: risk-api-service
+  name: risk-module-api-service
   namespace: nekazari
   labels:
-    app: risk-backend
+    app: risk-module-api
     module: risk
 spec:
   type: ClusterIP
@@ -113,4 +101,4 @@ spec:
       protocol: TCP
       name: http
   selector:
-    app: risk-backend
+    app: risk-module-api

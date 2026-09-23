@@ -26,6 +26,7 @@ COPY --from=builder --chown=appuser:appuser /root/.local /home/appuser/.local
 
 # Copy application code
 COPY --chown=appuser:appuser app/ ./app/
+COPY --chown=appuser:appuser common/ ./common/
 
 # Switch to non-root user
 USER appuser
