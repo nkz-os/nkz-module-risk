@@ -10,7 +10,7 @@ from typing import Any, Dict, List
 
 from nkz_platform_sdk import SyncOrionClient
 
-from app.alerts.contract import severity_for_score
+from app.alerts.contract import alert_entity_id, severity_for_score
 from app.config import get_settings
 from app.worker.alert_publisher import publish_alert
 from app.worker.models.factory import RiskModelFactory
@@ -32,6 +32,24 @@ def _get_catalog(conn) -> List[Dict[str, Any]]:
 
 def _get_entities(orion: SyncOrionClient, entity_type: str) -> List[Dict[str, Any]]:
     return orion.query_entities(type=entity_type, limit=200)
+
+
+def _dispatch_alert(tenant_id: str, alert_type: str, severity: str, entity_id: str) -> None:
+    """Entrega el aviso por los canales configurados (no-fatal)."""
+    from app.dispatcher import NotificationDispatcher
+
+    alert_id = alert_entity_id(tenant_id, alert_type, entity_id)
+    NotificationDispatcher().dispatch(
+        tenant_id,
+        alert_type,
+        severity,
+        {
+            "id": alert_id,
+            "title": f"Risk Alert — {alert_type}",
+            "summary": f"[{severity.upper()}] {alert_type}: {entity_id}",
+            "data": {"screen": "module/risk", "entityId": entity_id, "alertType": alert_type},
+        },
+    )
 
 
 def evaluate_risks_for_tenant(conn, tenant_id: str) -> Dict[str, int]:
@@ -81,6 +99,10 @@ def evaluate_risks_for_tenant(conn, tenant_id: str) -> Dict[str, int]:
                         confidence=result.get("confidence", 1.0),
                     ):
                         evaluated += 1
+                        try:
+                            _dispatch_alert(tenant_id, risk["alert_type"], severity.value, entity_id)
+                        except Exception as e:
+                            logger.warning("dispatch failed for %s/%s: %s", risk["alert_type"], entity_id, e)
                     else:
                         errors += 1
                 except Exception as e:
