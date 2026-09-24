@@ -56,7 +56,7 @@ def test_dispatcher_routes_to_enabled_channels():
     d = NotificationDispatcher.__new__(NotificationDispatcher)
     d.settings = SimpleNamespace(
         email_service_url="e", push_service_url="p",
-        zulip_service_url="z", internal_secret="s",
+        zulip_service_url="z", internal_service_secret="s",
     )
     d._get_channels = lambda tid: {
         "email": {"enabled": True, "to": "a@b.com"},
