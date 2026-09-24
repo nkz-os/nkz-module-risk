@@ -1,7 +1,11 @@
 """Publica Alert en Orion-LD vía el SDK (sustituye a la entidad RiskAssessment)."""
+import logging
+
 from nkz_platform_sdk import SyncOrionClient
 
 from app.alerts.contract import AlertCategory, AlertSeverity, build_alert_entity
+
+logger = logging.getLogger(__name__)
 
 
 def publish_alert(
@@ -37,4 +41,10 @@ def publish_alert(
 
     with SyncOrionClient(tenant_id, base_url=orion_ld_url, context_url=context_url) as client:
         result = client.upsert_entities_batch([entity])
-    return bool(result and result.get("upserted", 0) >= 1)
+    ok = bool(result and result.get("upserted", 0) >= 1)
+    if not ok:
+        logger.warning(
+            "Orion rejected Alert %s/%s: %s",
+            alert_type, entity_id, (result or {}).get("errors"),
+        )
+    return ok
