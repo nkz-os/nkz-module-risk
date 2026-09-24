@@ -31,6 +31,9 @@ def test_publish_alert_builds_alert_and_upserts():
         assert entity["probabilityScore"]["value"] == 82.5
         assert entity["refEntity"]["object"] == "urn:ngsi-ld:AgriParcel:abc"
         assert entity["category"]["value"] == "agronomic"
+        # observedAt debe ser un literal DateTime tipado (Orion rechaza string plano)
+        assert entity["observedAt"]["value"]["@type"] == "DateTime"
+        assert entity["observedAt"]["value"]["@value"].endswith("Z")
 
 
 def test_publish_alert_returns_false_when_not_upserted():
