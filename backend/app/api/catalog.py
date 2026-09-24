@@ -12,7 +12,8 @@ from app.worker.sources import SOURCE_CATALOG
 
 router = APIRouter()
 
-_OPERATORS = {"<", "<=", ">", ">=", "==", "!=", "in", "not_in"}
+_OPERATORS = {"<", "<=", ">", ">=", "==", "!=", "in", "not_in", "between"}
+_AGGREGATES = {"sum", "avg", "min", "max", "delta"}
 _SEVERITIES = {"low", "medium", "high", "critical"}
 
 
@@ -23,11 +24,13 @@ class Condition(BaseModel):
     value: Union[float, int, str, List[Union[float, int, str]]]
     unit: str | None = None
     duration_minutes: int = 0
+    aggregate: str | None = None
     severity: str = "medium"
 
 
 class ConditionGroup(BaseModel):
     logical_operator: str = "AND"
+    min_conditions: int | None = None
     conditions: List[Union[Condition, "ConditionGroup"]]
 
 
@@ -44,6 +47,9 @@ class CustomRiskIn(BaseModel):
 
 
 def _validate_tree(group: ConditionGroup, sources: List[str]) -> None:
+    op = (group.logical_operator or "AND").upper()
+    if op not in ("AND", "OR") and not op.startswith("COUNT"):
+        raise HTTPException(400, f"unknown logical_operator: {group.logical_operator}")
     for cond in group.conditions:
         if isinstance(cond, ConditionGroup):
             _validate_tree(cond, sources)
@@ -54,6 +60,10 @@ def _validate_tree(group: ConditionGroup, sources: List[str]) -> None:
             raise HTTPException(400, f"source {cond.source} not declared in data_sources")
         if cond.operator not in _OPERATORS:
             raise HTTPException(400, f"unknown operator: {cond.operator}")
+        if cond.operator == "between" and not isinstance(cond.value, list):
+            raise HTTPException(400, "operator 'between' requires a [lo, hi] list value")
+        if cond.aggregate is not None and cond.aggregate not in _AGGREGATES:
+            raise HTTPException(400, f"unknown aggregate: {cond.aggregate}")
         if cond.severity not in _SEVERITIES:
             raise HTTPException(400, f"invalid severity: {cond.severity}")
 

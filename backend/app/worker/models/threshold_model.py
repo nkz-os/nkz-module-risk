@@ -18,6 +18,8 @@ condición no se evalúa y la confianza cae.
 """
 from typing import Any, Dict, List
 
+import re
+
 from .base_model import BaseRiskModel
 
 _SEV_ORDER = {"low": 0, "medium": 1, "high": 2, "critical": 3}
@@ -78,6 +80,11 @@ def _strength(val: Any, operator: str, target: Any) -> float:
             return 1.0 if val == target else 0.0
         if operator == "!=":
             return 1.0 if val != target else 0.0
+        if operator == "between":
+            if isinstance(target, (list, tuple)) and len(target) >= 2:
+                lo, hi = target[0], target[1]
+                return 1.0 if lo <= val <= hi else 0.0
+            return 0.0
         if operator in ("in", "not_in"):
             haystack = target if isinstance(target, list) else [target]
             present = val in haystack
@@ -85,6 +92,38 @@ def _strength(val: Any, operator: str, target: Any) -> float:
     except (TypeError, ValueError):
         return 0.0
     return 0.0
+
+
+_AGGREGATES = {"sum", "avg", "min", "max", "delta"}
+
+
+def _aggregate(series: List[tuple], op: str) -> Any:
+    """Agrega la serie ([(valor, ts), ...]) según op. None si no hay datos."""
+    values = [v for v, _t in series]
+    if not values:
+        return None
+    try:
+        if op == "sum":
+            return sum(values)
+        if op == "avg":
+            return sum(values) / len(values)
+        if op == "min":
+            return min(values)
+        if op == "max":
+            return max(values)
+        if op == "delta":
+            return max(values) - min(values)
+    except (TypeError, ValueError):
+        return None
+    return None
+
+
+def _count_threshold(group: Dict[str, Any], op: str) -> int:
+    """N de un grupo COUNT (de 'COUNT>=N' o de group['min_conditions'])."""
+    m = re.match(r"COUNT>=?(\d+)", op)
+    if m:
+        return int(m.group(1))
+    return group.get("min_conditions") or 1
 
 
 class ThresholdRiskModel(BaseRiskModel):
@@ -133,20 +172,25 @@ class ThresholdRiskModel(BaseRiskModel):
         if not scores:
             return 0.0, 1.0, "low", factors
 
+        max_sev = max(sevs, key=lambda s: _SEV_ORDER.get(s, 0))
+
         if op == "OR":
+            return max(scores), max(confs), max_sev, factors
+
+        if op.startswith("COUNT"):
+            n = _count_threshold(group, op)
+            matched = [(s, c) for s, c in zip(scores, confs) if s > 0]
+            if len(matched) < n:
+                return 0.0, 1.0, "low", factors
             return (
-                max(scores),
-                max(confs),
-                max(sevs, key=lambda s: _SEV_ORDER.get(s, 0)),
+                min(s for s, _ in matched),
+                min(c for _, c in matched),
+                max_sev,
                 factors,
             )
+
         # AND
-        return (
-            min(scores),
-            min(confs),
-            max(sevs, key=lambda s: _SEV_ORDER.get(s, 0)),
-            factors,
-        )
+        return min(scores), min(confs), max_sev, factors
 
     def _eval_condition(self, cond: Dict[str, Any], data_sources: Dict[str, Any]):
         source = cond.get("source")
@@ -154,9 +198,23 @@ class ThresholdRiskModel(BaseRiskModel):
         operator = cond.get("operator")
         target = cond.get("value")
         duration = cond.get("duration_minutes") or 0
+        aggregate = cond.get("aggregate")
 
         val = _get(data_sources, source, attribute)
         series = _get_series(data_sources, source, attribute) if duration > 0 else None
+
+        if duration > 0 and series is not None and aggregate:
+            agg_val = _aggregate(series, aggregate)
+            if agg_val is None:
+                return 0.0, 0.0, "low", [f"{source}.{attribute}: no data for {aggregate}"]
+            strength = _strength(agg_val, operator, target)
+            score = strength * 100.0
+            severity = cond.get("severity", "medium") if strength > 0 else "low"
+            factor = (
+                f"{source}.{attribute} {aggregate}({len(series)} samples)={agg_val:.2f} "
+                f"{operator} {target} → {strength:.2f}"
+            )
+            return score, 1.0, severity, [factor]
 
         if duration > 0 and series is not None:
             latest = val if val is not None else (series[-1][0] if series else None)
