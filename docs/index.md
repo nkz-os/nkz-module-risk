@@ -1,33 +1,34 @@
 ---
-title: "Riesgos y Avisos"
-description: "Módulo de riesgos agronómicos: motor de condiciones declarativo, catálogo de 24 riesgos y entrega multicanal de avisos."
+title: "Risk & Alerts"
+description: "Agronomic risk module: declarative condition engine, a 24-risk catalog, and multi-channel alert delivery."
 sidebar:
   order: 1
 ---
 
-# Riesgos y Avisos
+# Risk & Alerts
 
-El módulo de **riesgos agronómicos** de Nekazari evalúa por parcela las amenazas de clima,
-agua/suelo, enfermedades y plagas, y publica una única entidad `Alert` (FIWARE Smart Data Model)
-que se entrega por los canales configurados (email, push, Zulip, webhook/N8N, Telegram).
+The **agronomic risk** module for Nekazari evaluates per-parcel threats from climate, water/soil,
+disease and pests, and publishes a single `Alert` entity (FIWARE Smart Data Model) delivered over
+the configured channels (email, push, Zulip, webhook/N8N, Telegram).
 
-## Características
+## Features
 
-- **Catálogo de 24 riesgos** (helada, estrés hídrico, oídio, mildiu, araña roja, mosca de la
-  fruta…), listo y documentado.
-- **Panel de control con editor visual**: cualquier riesgo se puede crear o ajustar desde la
-  UI con un árbol de condiciones (AND/OR/N-de-M, rangos, agregaciones temporales y duración).
-- **Superficie de avisos integrada**: campana global en la barra de navegación + sección
-  «Avisos» en el panel de cada parcela.
-- **Sin escrituras directas a telemetría**: todo fluye por Orion-LD (bus canónico).
+- **Catalog of 24 risks** (frost, water stress, powdery mildew, downy mildew, red spider mite,
+  fruit fly…) ready and documented.
+- **Visual editor in the control panel**: any risk can be created or tuned from the UI with a
+  condition tree (AND/OR/N-of-M, ranges, temporal aggregations and duration).
+- **Integrated alert surface**: a global bell in the host top navigation + an «Alerts» section
+  in each parcel's detail panel.
+- **No direct telemetry writes**: everything flows through Orion-LD (canonical bus).
 
-## Dónde se ven los avisos
+## Where alerts surface
 
-- **Campana global** (host): badge con los avisos activos high/critical + desplegable.
-- **Panel de detalle de parcela**: sección «Avisos» con los riesgos de esa parcela.
-- **Pestaña Monitor** del módulo.
+- **Global bell** (host): badge with active high/critical alerts + dropdown.
+- **Parcel details panel**: an «Alerts» section with that parcel's risks.
+- **Monitor tab** of the module.
 
-## Referencia
+## Reference
 
-La documentación técnica completa (arquitectura, DSL de condiciones, fuentes de datos,
-catálogo completo y cómo añadir riesgos) está en el [README del repositorio](https://github.com/nkz-os/nkz-module-risk).
+The full technical documentation (architecture, condition DSL, data sources, complete catalog
+and how to add risks) lives in the
+[repo README](https://github.com/nkz-os/nkz-module-risk).
