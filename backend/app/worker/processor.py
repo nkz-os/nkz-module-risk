@@ -15,6 +15,7 @@ from app.config import get_settings
 from app.worker import sources, weather_source
 from app.worker.alert_publisher import publish_alert
 from app.worker.models.factory import RiskModelFactory
+from app.worker.models.threshold_model import series_requests
 
 logger = logging.getLogger(__name__)
 
@@ -57,6 +58,16 @@ def _prepare_data_sources(tenant_id, risk, entity, orion, conn, settings) -> Dic
         fetcher = sources.SOURCE_FETCHERS.get(src)
         if fetcher and parcel_id:
             data[src] = fetcher(ctx, parcel_id, risk)
+
+    # Series temporales para condiciones sostenidas (duration_minutes > 0).
+    for (src, attr), minutes in series_requests(risk.get("model_config")).items():
+        if src == "telemetry" or not parcel_id:
+            continue
+        series = sources.fetch_series(conn, tenant_id, parcel_id, src, attr, minutes)
+        if series is not None:
+            data.setdefault(src, {})[f"__series__{attr}"] = series
+        else:
+            logger.debug("no series for %s.%s (duration_minutes unsupported)", src, attr)
     return data
 
 

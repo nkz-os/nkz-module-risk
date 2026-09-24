@@ -149,6 +149,76 @@ def fetch_telemetry(conn, tenant_id: str, device_id: str, metric_name: str, hour
         return None
 
 
+# ── Series temporales (duration_minutes) ────────────────────────────
+# Mapa inverso: flat key -> (attribute_name en telemetry_measurements, converter).
+# Solo los atributos que el feed de WeatherObserved escribe como serie soportan
+# `duration_minutes`; el resto (p.ej. temp_min/temp_max, que viven solo en
+# WeatherForecast) cae al valor puntual.
+_FLAT_TO_NGSI = {
+    "temp_avg": ("airTemperature", None),
+    "temperature": ("tempCurrent", None),
+    "humidity": ("humidity", None),
+    "humidity_avg": ("humidity", None),
+    "precip_mm": ("precipitation", None),
+    "precipitation": ("precipitation", None),
+    "eto_mm": ("et0", None),
+    "delta_t": ("deltaT", None),
+    "wind_speed_ms": ("windSpeed", None),
+    "wind_direction_deg": ("windDirection", None),
+    "solar_rad_w_m2": ("solarRadiation", None),
+    "solar_rad_ghi_w_m2": ("solarRadiation", None),
+    "radiation": ("solarRadiation", None),
+    "pressure_hpa": ("atmosphericPressure", None),
+    "soil_moisture_0_10cm": ("soilMoistureTop", weather_source._percent),
+    "soil_moisture_10_40cm": ("soilMoistureSub", weather_source._percent),
+    "gdd_accumulated": ("gddAccumulated", None),
+}
+
+
+def fetch_weather_series(
+    conn, tenant_id: str, parcel_id: str, attribute: str, minutes: int
+) -> Optional[List[tuple]]:
+    """Serie temporal de un atributo weather sobre [now - minutes, now].
+
+    Lee el feed que la suscripción de WeatherObserved vuelca en
+    telemetry_measurements (entity_id = id canónico de WeatherObserved).
+    Devuelve [(valor, observed_at), ...] (ascendente) o None si el atributo
+    no tiene serie disponible.
+    """
+    entry = _FLAT_TO_NGSI.get(attribute)
+    if entry is None:
+        return None
+    ngsi_name, convert = entry
+    entity_id = weather_source.weather_observed_id(tenant_id, parcel_id)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT value, observed_at
+            FROM telemetry_measurements
+            WHERE tenant_id = %s AND entity_id = %s AND attribute_name = %s
+              AND observed_at >= NOW() - make_interval(mins => %s)
+            ORDER BY observed_at ASC
+            """,
+            (tenant_id, entity_id, ngsi_name, minutes),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        return [(convert(v) if convert else v, t) for (v, t) in rows]
+    except Exception as e:
+        logger.error("weather series fetch failed for %s/%s: %s", tenant_id, attribute, e)
+        return None
+
+
+def fetch_series(
+    conn, tenant_id: str, parcel_id: str, source: str, attribute: str, minutes: int
+) -> Optional[List[tuple]]:
+    """Serie temporal genérica por (source, attribute) — None si no hay serie."""
+    if source == "weather":
+        return fetch_weather_series(conn, tenant_id, parcel_id, attribute, minutes)
+    return None
+
+
 # ── Registry de fuentes por parcela ────────────────────────────────────
 # Cada entrada es un callable (ctx, parcel_id, risk) -> data. Añadir una fuente
 # nueva = añadir una entrada aquí (no hay que tocar processor.py).

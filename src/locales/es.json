@@ -54,6 +54,7 @@
     "description": "Descripción",
     "logic": "Lógica",
     "condition": "Añadir condición",
-    "create": "Crear riesgo"
+    "create": "Crear riesgo",
+    "duration": "dur. (min)"
   }
 }

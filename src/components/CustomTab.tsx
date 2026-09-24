@@ -13,6 +13,7 @@ interface Cond {
   attribute: string;
   operator: string;
   valueText: string;
+  durationText: string;
   severity: string;
 }
 
@@ -25,7 +26,7 @@ const App: React.FC = () => {
   const [description, setDescription] = useState('');
   const [operator, setOperator] = useState<'AND' | 'OR'>('AND');
   const [conditions, setConditions] = useState<Cond[]>([
-    { source: 'weather', attribute: 'temp_min', operator: '<', valueText: '0', severity: 'high' },
+    { source: 'weather', attribute: 'temp_min', operator: '<', valueText: '0', durationText: '', severity: 'high' },
   ]);
   const [saving, setSaving] = useState(false);
   const [done, setDone] = useState<string | null>(null);
@@ -44,7 +45,7 @@ const App: React.FC = () => {
   const add = () =>
     setConditions((c) => [
       ...c,
-      { source: 'weather', attribute: '', operator: '<', valueText: '0', severity: 'medium' },
+      { source: 'weather', attribute: '', operator: '<', valueText: '0', durationText: '', severity: 'medium' },
     ]);
   const remove = (i: number) => setConditions((c) => c.filter((_, j) => j !== i));
   const update = (i: number, patch: Partial<Cond>) =>
@@ -75,6 +76,7 @@ const App: React.FC = () => {
             operator: c.operator,
             value: parseValue(c.operator, c.valueText),
             severity: c.severity,
+            ...(Number(c.durationText) > 0 ? { duration_minutes: Number(c.durationText) } : {}),
           })),
         },
       });
@@ -124,7 +126,7 @@ const App: React.FC = () => {
       </div>
 
       {conditions.map((c, i) => (
-        <div key={i} className="grid grid-cols-2 md:grid-cols-6 gap-2 items-center">
+        <div key={i} className="grid grid-cols-2 md:grid-cols-7 gap-2 items-center">
           <select
             value={c.source}
             onChange={(e) => update(i, { source: e.target.value, attribute: '' })}
@@ -157,6 +159,14 @@ const App: React.FC = () => {
             value={c.valueText}
             onChange={(e) => update(i, { valueText: e.target.value })}
             placeholder={c.operator === 'in' || c.operator === 'not_in' ? 'a,b,c' : 'valor'}
+            className="border border-nkz-border rounded-lg px-2 py-1.5 text-sm"
+          />
+          <input
+            value={c.durationText}
+            onChange={(e) => update(i, { durationText: e.target.value })}
+            placeholder={t('custom.duration')}
+            type="number"
+            min="0"
             className="border border-nkz-border rounded-lg px-2 py-1.5 text-sm"
           />
           <select
