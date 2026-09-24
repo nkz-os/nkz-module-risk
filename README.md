@@ -1,231 +1,195 @@
-# Nekazari Module Template
+# nkz-module-risk
 
-Starter template for building **external modules** for the Nekazari platform.
+Módulo federado de **riesgos y avisos agronómicos** de la plataforma Nekazari.
 
-Modules are built as **Module Federation 2.0 remotes** (`dist/remoteEntry.js` + `dist/mf-manifest.json` + `dist/assets/`) plus a `dist/manifest.json`. All are uploaded to MinIO and loaded at runtime by the host via `loadRemote()`. No build-time coupling to the host.
+Consolida el sistema de riesgos en una única entidad FIWARE Smart Data Model (`Alert`),
+con un **motor de condiciones declarativo** que permite configurar cualquier riesgo desde
+el panel de control, sin escribir código. Publica los avisos en Orion-LD y los entrega por
+múltiples canales (email, push, Zulip, webhook/N8N, Telegram).
 
 ---
 
-## Quick start
+## Qué hace
+
+- **Evalúa** riesgos agronómicos (clima, agua/suelo, enfermedades, plagas) por parcela,
+  leyendo las fuentes canónicas de la plataforma (Orion-LD + TimescaleDB).
+- **Publica** una entidad `Alert` por riesgo detectado (bus canónico, nunca escribe
+  telemetría directamente).
+- **Entrega** los avisos por los canales configurados por tenant.
+- **Expone** un **panel de control** (UI) con:
+  - **Monitor** — avisos activos en tiempo real.
+  - **Catálogo** — riesgos disponibles.
+  - **Custom** — editor visual de riesgos a medida (árbol de condiciones).
+  - **Integraciones** — canales (email/push/Zulip/webhook/Telegram).
+
+## Dónde se ven los avisos
+
+- **Campana global** en la barra de navegación del host (badge high/critical + desplegable).
+- **Panel de detalle de parcela** — sección «Avisos» con los riesgos de esa parcela.
+- **Tab Monitor** del módulo.
+
+---
+
+## Arquitectura
+
+```
+fuentes (Orion-LD + TimescaleDB)
+        │  SOURCE_FETCHERS (registry)
+        ▼
+model_config (árbol de condiciones declarativo)
+        │  ThresholdRiskModel / modelos epidemiológicos
+        ▼
+Alert (SDM) ──► Orion-LD ──► canales (email / push / zulip / webhook / telegram)
+```
+
+Una única entidad `Alert` (SDM `dataModel.Alert`), con `category`, `alertType`, `severity`,
+`refEntity` (la parcela), `probabilityScore`, `confidence`, `evaluationData` y `observedAt`.
+
+---
+
+## Catálogo de riesgos (24)
+
+> Los 21 de la tabla viven en `risk.alert_catalog`. Los 3 de enfermedad con asterisco (*)
+> son **modelos epidemiológicos** evaluados por `disease_evaluator` (no configurables por
+> umbral; oídio y mildiu se mantienen como modelo a propósito).
+
+### Clima — `weather`
+
+| alert_type | Riesgo | Condición |
+|---|---|---|
+| heat_stress | Golpe de calor | temp_avg > 35 °C **y** humidity < 30 % (alta); > 32 °C (media) |
+| hail_proxy | Granizo (proxy) | Δpresión > 5 hPa **y** Δtemp > 8 °C en 6 h |
+| wind_damage | Daño por viento | viento > 60 km/h (alta); > 40 km/h (media) |
+| sunburn | Insolación de fruto | radiación > 850 W/m² **y** T > 33 °C (alta); > 700 W/m² (media) |
+| fire_30_30_30 | Incendio (30-30-30) | 2 de 3: T > 30 °C, HR < 30 %, viento > 30 km/h |
+| weather_alert | Aviso meteorológico | AEMET / MeteoAlarm sobre la parcela |
+
+### Agua y suelo — `agronomic`
+
+| alert_type | Riesgo | Condición |
+|---|---|---|
+| frost | Helada | temp_min < 0 °C (modelo) |
+| water_stress | Estrés hídrico | cascada CWSI → déficit → suelo < 15-20 % (modelo) |
+| waterlogging | Asfixia radicular | humedad suelo > 45 % sostenida 48 h |
+| saline_stress | Estrés salino | CE > 4 dS/m (alta); > 2,5 (media) — *requiere dato EC* |
+| nutrient_leaching | Lixiviación | lluvia > 40 mm/24 h (alta); > 25 mm (media) |
+| root_thermal_stress | Térmico radicular | T suelo > 28 °C o < 5 °C (alta); 25-28 o 5-8 (media) |
+| gdd_pest | Plaga por grados-día | acumulación GDD (modelo) |
+| wind_spray | Deriva en pulverización | viento (modelo) |
+| spray_suitability | Idoneidad de pulverización | meteorología apta (modelo) |
+
+### Enfermedades — `disease`
+
+| alert_type | Riesgo | Condición |
+|---|---|---|
+| botrytis | Botrytis (pudrición) | mojado foliar > 12 h **y** T 15-20 °C (alta); > 8 h (media) |
+| rust_yellow | Roya amarilla/parda | mojado > 8 h **y** T 10-15 °C (alta); T 5-10 °C (media) |
+| fire_blight | Fuego bacteriano | T > 18 °C **y** mojado > 4 h (alta); T > 15 °C (media) |
+| oidio_gubler* | Oídio (Gubler-Thomas) | modelo epidemiológico |
+| mildiu_goidanich* | Mildiu (Magarey) | modelo epidemiológico |
+| alternaria* | Alternaria (Tom-Cast) | modelo epidemiológico |
+
+### Plagas — `pest`
+
+| alert_type | Riesgo | Condición |
+|---|---|---|
+| red_spider | Araña roja | T > 30 °C **y** HR < 40 % (alta); T > 25 °C (media) |
+| fruit_fly | Mosca de la fruta | T entre 16-32 °C (alta); 12-16 °C (media) |
+| aphids | Pulgón | T 20-25 °C **y** NDVI > 0,6 (alta); T 15-20 °C (media) |
+
+---
+
+## DSL de condiciones (riesgos a medida)
+
+Un riesgo a medida es una fila del catálogo con `model_type = "threshold"` y un
+`model_config` declarativo:
+
+```jsonc
+// HOJA (condición)
+{
+  "source": "weather",            // fuente (ver tabla de fuentes)
+  "attribute": "temp_avg",        // atributo aplanado
+  "operator": "< | <= | > | >= | == | != | in | not_in | between",
+  "value": 0,                     // escalar, o [lo, hi] para between/in
+  "severity": "high",             // low | medium | high | critical
+  "duration_minutes": 0,          // ventana temporal
+  "aggregate": null               // null | sum | avg | min | max | delta (sobre la serie)
+}
+
+// GRUPO (recursivo)
+{
+  "logical_operator": "AND | OR | COUNT>=N",
+  "min_conditions": 2,            // para COUNT>=N (N de M)
+  "conditions": [ /* hojas o subgrupos */ ]
+}
+```
+
+Semántica:
+
+- `between [lo, hi]` → se cumple si `lo ≤ valor ≤ hi`.
+- `duration_minutes > 0` sin `aggregate` → condición **sostenida** (≥60 % de cobertura en la ventana).
+- `duration_minutes > 0` con `aggregate` → agrega la serie y compara:
+  - `sum` — lluvia acumulada (p. ej. > 40 mm/24 h).
+  - `delta` — amplitud máx−mín (p. ej. caída de presión).
+  - `avg` / `min` / `max` — media, mínimo, máximo de la ventana.
+- `COUNT>=N` → se cumple si al menos N hijos se cumplen (AND = COUNT>=M, OR = COUNT>=1).
+
+---
+
+## Fuentes de datos
+
+| Fuente | Atributos (aplanados) | Origen |
+|---|---|---|
+| `weather` | temp_min, temp_max, temp_avg, humidity, precip_mm, eto_mm, wind_speed_ms, wind_direction_deg, solar_rad_w_m2, pressure_hpa, soil_moisture_0_10cm, soil_moisture_10_40cm, gdd_accumulated | `WeatherObserved` + `WeatherForecast` (Orion-LD) |
+| `soil` | texture, awc, field_capacity, wilting_point, ec, temperature | `AgriSoil` / `AgriSoilExtended` |
+| `ndvi` | ndvi, savi | `EOProduct` |
+| `crop_health` | cwsi, compaction_risk_score, soil_water_ratio, vhi, vci, gdd_accumulated | `CropHealthAssessment` |
+| `gdd` | gdd_season_total, days_accumulated | TimescaleDB |
+| `leaf_wetness` | hours | derivada (NHRH: horas de HR ≥ 90 %) |
+| `weather_alerts` | (lista AEMET/MeteoAlarm) | weather-api |
+| `telemetry` | value | `telemetry_measurements` (dispositivo) |
+
+> `soil.ec` y `soil.temperature` se leen del broker; si aún no hay dato, la condición
+> queda sin evaluar (no se inventa un valor) y no dispara.
+
+---
+
+## Cómo añadir un riesgo
+
+### Desde el panel (recomendado)
+
+1. Abre el módulo → tab **Custom**.
+2. Pon nombre, descripción y categoría.
+3. Construye el árbol: añade condiciones y/o grupos, elige fuente → atributo → operador →
+   valor → severidad, y opcionalmente duración y agregación.
+4. Crea el riesgo. Aparece en el catálogo y el worker lo evalúa en el siguiente ciclo.
+
+### Programático (API)
 
 ```bash
-git clone https://github.com/nkz-os/nkz-module-template.git my-module
-cd my-module
-pnpm install
-```
-
-Do a **find-and-replace** across the repo for these placeholders (this includes `src/locales/*.json` and `src/moduleEntry.ts` — the substitution walks every file, not just config):
-
-| Placeholder | Example value | Where |
-|-------------|---------------|-------|
-| `risk` | `soil-sensor` | package.json (`name`, `nkz.moduleId`), moduleEntry.ts (`id`), k8s/, SQL |
-| `Risk` | `Soil Sensor` | moduleEntry.ts (`displayName`), locales/, k8s/, SQL |
-| `/risk` | `/soil-sensor` | k8s/, SQL |
-| `YOUR_ORG` | `acme-corp` | k8s/backend-deployment.yaml, SQL |
-| `YOUR_NAME` | `Jane Smith` | k8s/registration.sql (`author`) |
-
-Then edit `src/moduleEntry.ts` to declare your slots, accent colour, icon, and permissions.
-
----
-
-## Structure
-
-```
-my-module/
-├── src/
-│   ├── moduleEntry.ts          # export default defineModule({...}) — MF2 entry
-│   ├── App.tsx                 # Main page component (lazy-loaded via moduleEntry.ts)
-│   ├── main.tsx                # Dev-only entry (Vite) — not part of the production bundle
-│   ├── i18n.ts                 # i18next resource bundle registration
-│   ├── locales/                # en/es filled in; ca/eu/fr/pt ship as {} skeletons
-│   ├── slots/index.ts           # Declare which host slots you occupy
-│   ├── components/slots/       # Slot React components (wrapped in <SlotShell>)
-│   ├── services/api.ts         # API client template (VITE_API_URL base)
-│   └── types/                  # TypeScript types
-├── backend/                    # FastAPI backend (optional, delete if unused)
-│   └── app/
-│       ├── middleware/         # Gateway-header auth (nkz_platform_sdk.auth) —
-│       │                       # NO JWKS/JWT validation in the module.
-│       └── api/internal.py     # /internal/* — X-Internal-Service-Secret only
-├── k8s/
-│   ├── backend-deployment.yaml # K8s Deployment + Service for backend
-│   └── registration.sql        # Insert/update marketplace_modules
-├── manifest.json                # NKZ metadata (routing, slots, data CSP) — edit by hand,
-│                                 # read at registration/publish time, NOT emitted into dist/
-├── vite.config.ts              # Uses @nekazari/module-builder preset (MF2)
-├── package.json
-└── dist/                       # `pnpm run build:module` output
-    ├── remoteEntry.js          # Federation remote entry
-    ├── mf-manifest.json        # Federation manifest (shared deps + exposes)
-    └── assets/                 # Sync + async chunks
+POST /api/risk/catalog/custom          # tenant-scoped (corrige la fuga cross-tenant)
+GET  /api/risk/catalog                 # catálogo activo (global + custom del tenant)
+GET  /api/risk/catalog/sources         # fuentes + atributos (para autocompletar la UI)
+GET  /api/risk/alerts                  # Alert activos del tenant (filtrable category/severity)
 ```
 
 ---
 
-## `defineModule()` — the single source of truth
-
-Edit `src/moduleEntry.ts`:
-
-```ts
-import { defineModule } from '@nekazari/module-kit';
-import { lazy } from 'react';
-import './i18n';
-import { moduleSlots } from './slots';
-import pkg from '../package.json';
-
-const MainPage = lazy(() => import('./App'));
-
-export default defineModule({
-  id: 'soil-sensor',
-  displayName: 'Soil Sensor',
-  version: pkg.version,
-  hostApiVersion: '^2.0.0',
-  description: 'Soil Sensor — Nekazari Platform Module',
-  accent: { base: '#A16207', soft: '#FEF3C7', strong: '#713F12' },
-  icon: 'sprout',
-  main: MainPage,
-  slots: moduleSlots as never,
-});
-```
-
-Do **not** call `window.__NKZ__.register()` — that IIFE pattern no longer works under Module Federation 2.0. Export the `defineModule()` result instead; the builder and host runtime derive registration, slots and manifest from it.
-
-`risk` must match the `id` column in `marketplace_modules` exactly.
-
----
-
-## Hooks — talking to the platform
-
-Everything comes from `@nekazari/sdk` (shared federation singleton, resolved by the host at runtime):
-
-```tsx
-import { useViewer, useAuth, useTranslation } from '@nekazari/sdk';
-import { SlotShell } from '@nekazari/viewer-kit';
-
-const { t } = useTranslation('risk');
-const { selectedEntityId } = useViewer();
-const { isAuthenticated, user, getToken, getTenantId } = useAuth();
-```
-
-For your own backend, `src/services/api.ts` wraps `NKZClient` (also from `@nekazari/sdk`) with the module's `VITE_API_URL` base — see that file for the pattern. There is **no `useConfig()` hook**; read the API base at build time via `import.meta.env.VITE_API_URL`.
-
-You never write raw `fetch`, never handle JWT cookies, never construct `Fiware-Service` headers by hand.
-
----
-
-## Build
+## Desarrollo
 
 ```bash
-pnpm run build:module
-# → dist/remoteEntry.js, dist/mf-manifest.json, dist/assets/*
-#   (Module Federation 2.0 remote — upload the whole dist/ directory to MinIO)
+# Backend (FastAPI)
+cd backend
+PYTHONPATH=. .venv/bin/python -m pytest tests/ -q
+
+# Frontend (Module Federation 2.0)
+pnpm typecheck
+pnpm build:module
 ```
 
-The `@nekazari/module-builder@^2.0.3` preset (`nkzModulePreset()`) configures Module Federation 2.0 via `@module-federation/vite`:
-- **Singleton shared deps** — `react`, `react-dom`, `@nekazari/*`, `i18next`, `react-i18next` resolved by the host at runtime. Never bundle them.
-- **`src/moduleEntry.ts`** → `export default defineModule({...})` is the single entry point exposed as `./Module`. The build emits `dist/remoteEntry.js` + `dist/mf-manifest.json` + `dist/assets/*`. The root-level `manifest.json` is separate — it is hand-edited metadata (routing, slots, data CSP) consumed at registration/publish time, not emitted into `dist/`.
-
----
-
-## Local development
-
-```bash
-pnpm run dev
-# http://localhost:5003 — dev shell only, not the production slot
-```
-
-For integration with a real backend, set `VITE_PROXY_TARGET=https://your-api-domain` in `.env`.
-
----
-
-## Deploy
-
-Push to `main`. That's it.
-
-The included `.github/workflows/build-push.yml` handles everything via GitHub Actions:
-
-1. **Tests** — frontend typecheck + backend tests
-2. **Build** — `pnpm run build:module` produces `dist/` (disabled by default in the raw template — the placeholder `risk` id fails the builder's kebab-case validator; remove the job's `if: false` once you've replaced placeholders)
-3. **Publish** — uploads to immutable `modules/risk/<git-sha>/` on MinIO, flips the live pointer
-
-The publish step uses **GitHub OIDC** for authentication:
-- Runner gets a signed JWT from `token.actions.githubusercontent.com`
-- `POST https://nkz.robotika.cloud/api/internal/modules/risk/publish`
-- No manual MinIO uploads. No `kubectl`. No database SQL.
-
-**Prerequisites (one-time, org-level — already done for nkz-os):**
-- Org secret `INTERNAL_SERVICE_SECRET` configured in GitHub Actions secrets
-- Module registered in `marketplace_modules` (one-time SQL `INSERT`, see `k8s/registration.sql`)
-- Module metadata includes gateway routing keys:
-  - `api_prefix` (for example `/api/risk`)
-  - `backend_service` (for example `http://risk-api-service:8000`)
-  - `backend_mount` (for example `/api/risk`)
-  - `requires_auth` (`true` by default)
-
-After first publish, verify metadata was preserved:
-
-```sql
-SELECT id, metadata->>'api_prefix', metadata->>'backend_service'
-FROM marketplace_modules
-WHERE id = 'risk';
-```
-
-If `api_prefix` is `NULL`, re-apply the routing metadata migration in `nkz` and invalidate the gateway `routes` cache.
-
----
-
-## Slots
-
-Edit `src/slots/index.ts` to register your components in host slots:
-
-```ts
-import type { ModuleViewerSlots } from '@nekazari/sdk';
-import { ExampleSlot } from '../components/slots/ExampleSlot';
-
-const MODULE_ID = 'soil-sensor';
-
-export const moduleSlots: ModuleViewerSlots = {
-  'map-layer': [],
-  'layer-toggle': [],
-  'context-panel': [
-    { id: 'soil-sensor-context', moduleId: MODULE_ID, component: 'ExampleSlot', localComponent: ExampleSlot, priority: 10 },
-  ],
-  'bottom-panel': [],
-  'entity-tree': [],
-  'dashboard-widget': [],
-};
-```
-
-Available slot types:
-
-| Slot | Where it renders |
-|------|-----------------|
-| `context-panel` | Side panel when an entity is selected |
-| `bottom-panel` | Tabbed panel at the bottom of the viewer |
-| `map-layer` | Overlay or toolbar button on the 3D map |
-| `layer-toggle` | Toggle entry in the layer panel |
-| `entity-tree` | Context menu in the entity tree |
-| `dashboard-widget` | Card in the tenant dashboard |
-
-Wrap every slot component's body in `<SlotShell>` from `@nekazari/viewer-kit` — it gives the panel chrome (title, accent scope, error boundary) the viewer expects; do not hand-roll that shell. See `src/components/slots/ExampleSlot.tsx`.
-
----
-
-## CSP-of-data (api-gateway enforcement)
-
-When the bundle calls a platform API, the gateway validates the requested NGSI-LD `type=` / Timescale hypertable against the module's declared data manifest (`data.entities` / `data.timeseries`). Declare exactly what your module needs — this is the platform's lightweight defence-in-depth, no replacement for sandboxing.
-
----
-
-## Build rules (critical)
-
-- **Keep `i18next@^23.11.0` and `react-i18next@^14.1.0`** — must match the host's singleton versions to avoid federation runtime version mismatch warnings.
-- **Never bundle shared deps** — React, ReactDOM, `@nekazari/*`, i18next, react-i18next. They come from the host as federation singletons. Bundling creates two instances and breaks hooks.
-- **`main` wrapper pattern** — `defineModule({ main: lazy(() => import('./App')) })` gives you a Suspense boundary for free; keep context providers, if any, inside `App.tsx`.
-- **i18n via ES import, not `window.__NKZ_SDK__`** — `import { i18n } from '@nekazari/sdk'` guarantees the SDK singleton is available at module-eval time; a `window.__NKZ_SDK__` read does not (the host injects it after the module's code has already loaded).
-
----
-
-## License
-
-Apache-2.0 — you are free to license your derived module under any terms.
+- **Test suite backend**: `backend/tests/` (motor de condiciones, catálogo, dispatcher, publicador).
+- **Deploy**: imagen GHCR + bump del digest en `gitops-config/overlays/modules/risk/` (ArgoCD);
+  el frontend se publica vía OIDC en push a `main`.
+- **Reglas de plataforma**: una sola entidad `Alert`; las escrituras de telemetría fluyen por
+  Orion-LD (nunca escrituras directas); `hasAgriParcel | refAgriParcel` como relación por parcela;
+  los temporales NGSI-LD (`observedAt`) van como string ISO desnudo, no como `Property`.

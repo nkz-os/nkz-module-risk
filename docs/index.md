@@ -1,32 +1,33 @@
 ---
-title: "[Tu Nombre de Módulo Aquí]"
-description: "Escribe aquí una descripción muy breve (1 línea) de lo que hace tu módulo."
+title: "Riesgos y Avisos"
+description: "Módulo de riesgos agronómicos: motor de condiciones declarativo, catálogo de 24 riesgos y entrega multicanal de avisos."
 sidebar:
   order: 1
 ---
 
-# Bienvenido a la Documentación de tu Módulo
+# Riesgos y Avisos
 
-> **¡Atención Desarrollador!** Esta carpeta `/docs` es mágica. Todo lo que escribas aquí se subirá automáticamente al portal público de documentación `nkz-os.org`. Por favor, **no pongas aquí notas privadas ni logs de errores**.
+El módulo de **riesgos agronómicos** de Nekazari evalúa por parcela las amenazas de clima,
+agua/suelo, enfermedades y plagas, y publica una única entidad `Alert` (FIWARE Smart Data Model)
+que se entrega por los canales configurados (email, push, Zulip, webhook/N8N, Telegram).
 
-## ¿Cómo añadir el Logo y un Pantallazo de tu módulo? (Guía Fácil)
+## Características
 
-Para que tu módulo luzca profesional en el catálogo de la web oficial, necesitas incluir imágenes. Sigue estos **3 sencillos pasos**:
+- **Catálogo de 24 riesgos** (helada, estrés hídrico, oídio, mildiu, araña roja, mosca de la
+  fruta…), listo y documentado.
+- **Panel de control con editor visual**: cualquier riesgo se puede crear o ajustar desde la
+  UI con un árbol de condiciones (AND/OR/N-de-M, rangos, agregaciones temporales y duración).
+- **Superficie de avisos integrada**: campana global en la barra de navegación + sección
+  «Avisos» en el panel de cada parcela.
+- **Sin escrituras directas a telemetría**: todo fluye por Orion-LD (bus canónico).
 
-### Paso 1: Guarda tus imágenes aquí
-Coge tu archivo del logo (por ejemplo, `logo.png`) y el pantallazo de tu aplicación (por ejemplo, `pantallazo.jpg`) y **arrástralos directamente dentro de esta misma carpeta `docs/`**. 
-*(Importante: Ponlos junto a este archivo `index.md`, no crees subcarpetas para las imágenes).*
+## Dónde se ven los avisos
 
-### Paso 2: Escribe este código
-Copia y pega el código que ves justo debajo, pero cambiando el nombre del archivo por el tuyo real:
+- **Campana global** (host): badge con los avisos activos high/critical + desplegable.
+- **Panel de detalle de parcela**: sección «Avisos» con los riesgos de esa parcela.
+- **Pestaña Monitor** del módulo.
 
-```markdown
-<!-- Así se pone el logo: -->
-![Logo de mi módulo](./logo.png)
+## Referencia
 
-<!-- Así se pone un pantallazo: -->
-![Vista principal del módulo](./pantallazo.jpg)
-```
-
-### Paso 3: ¡Listo!
-No tienes que hacer nada más. Cuando hagas `git push` a tu rama `main`, nuestro motor central se encargará de descargar tus imágenes automáticamente y las mostrará perfectamente encuadradas en la web oficial.
+La documentación técnica completa (arquitectura, DSL de condiciones, fuentes de datos,
+catálogo completo y cómo añadir riesgos) está en el [README del repositorio](https://github.com/nkz-os/nkz-module-risk).
