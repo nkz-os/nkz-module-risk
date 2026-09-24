@@ -31,9 +31,10 @@ def test_publish_alert_builds_alert_and_upserts():
         assert entity["probabilityScore"]["value"] == 82.5
         assert entity["refEntity"]["object"] == "urn:ngsi-ld:AgriParcel:abc"
         assert entity["category"]["value"] == "agronomic"
-        # observedAt debe ser un literal DateTime tipado (Orion rechaza string plano)
-        assert entity["observedAt"]["value"]["@type"] == "DateTime"
-        assert entity["observedAt"]["value"]["@value"].endswith("Z")
+        # observedAt es un temporal NGSI-LD: string ISO desnudo a nivel de entidad
+        # (Orion rechaza tanto el wrapper Property como el literal DateTime).
+        assert isinstance(entity["observedAt"], str)
+        assert entity["observedAt"].endswith("Z")
 
 
 def test_publish_alert_returns_false_when_not_upserted():

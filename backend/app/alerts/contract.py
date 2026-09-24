@@ -51,7 +51,7 @@ def build_alert_entity(*, tenant_id, entity_id, entity_type, alert_type,
         "confidence": {"type": "Property", "value": confidence},
         "evaluationData": {"type": "Property", "value": evaluation_data or {}},
         "status": {"type": "Property", "value": "active"},
-        "observedAt": {"type": "Property", "value": {"@type": "DateTime", "@value": _now()}},
+        "observedAt": _now(),
     }
     if probability_score is not None:
         e["probabilityScore"] = {"type": "Property", "value": probability_score}
