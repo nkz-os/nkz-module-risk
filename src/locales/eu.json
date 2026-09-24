@@ -46,6 +46,11 @@
     "logic": "Logic",
     "condition": "Add condition",
     "create": "Create risk",
-    "duration": "dur. (min)"
+    "duration": "dur. (min)",
+    "remove": "Remove",
+    "group": "Add group",
+    "atLeast": "at least",
+    "conditions": "conditions",
+    "noAggregate": "no aggregate"
   }
 }

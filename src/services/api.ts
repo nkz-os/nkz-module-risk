@@ -58,11 +58,13 @@ export interface RiskCondition {
   value: number | string | (number | string)[];
   unit?: string | null;
   duration_minutes?: number;
+  aggregate?: string | null;
   severity?: string;
 }
 
 export interface RiskConditionGroup {
   logical_operator?: string;
+  min_conditions?: number;
   conditions: (RiskCondition | RiskConditionGroup)[];
 }
 
