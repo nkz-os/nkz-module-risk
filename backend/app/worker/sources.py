@@ -157,7 +157,11 @@ def fetch_telemetry(conn, tenant_id: str, device_id: str, metric_name: str, hour
         )
         row = cursor.fetchone()
         cursor.close()
-        return {"value": row[0], "observed_at": row[1]} if row else None
+        if not row:
+            return None
+        if isinstance(row, dict):
+            return {"value": row["value"], "observed_at": row["observed_at"]}
+        return {"value": row[0], "observed_at": row[1]}
     except Exception as e:
         logger.error("telemetry fetch failed for %s/%s: %s", tenant_id, device_id, e)
         return None
@@ -218,7 +222,14 @@ def fetch_weather_series(
         )
         rows = cur.fetchall()
         cur.close()
-        return [(convert(v) if convert else v, t) for (v, t) in rows]
+        out = []
+        for row in rows:
+            if isinstance(row, dict):
+                v, t = row["value"], row["observed_at"]
+            else:
+                v, t = row[0], row[1]
+            out.append((convert(v) if convert else v, t))
+        return out
     except Exception as e:
         logger.error("weather series fetch failed for %s/%s: %s", tenant_id, attribute, e)
         return None
