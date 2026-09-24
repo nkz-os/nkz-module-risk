@@ -53,5 +53,13 @@
     "conditions": "conditions",
     "noAggregate": "no aggregate"
   },
-  "subtitle": "Risks and alerts for your parcels"
+  "subtitle": "Risks and alerts for your parcels",
+  "context": {
+    "title": "Parcel alerts",
+    "empty": "No alerts for this entity"
+  },
+  "widget": {
+    "title": "Recent alerts",
+    "empty": "No active alerts"
+  }
 }

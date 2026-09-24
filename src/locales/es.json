@@ -62,5 +62,13 @@
     "conditions": "condiciones",
     "noAggregate": "sin agregar"
   },
-  "subtitle": "Riesgos y avisos de tus parcelas"
+  "subtitle": "Riesgos y avisos de tus parcelas",
+  "context": {
+    "title": "Avisos de la parcela",
+    "empty": "Sin avisos para esta entidad"
+  },
+  "widget": {
+    "title": "Avisos recientes",
+    "empty": "Sin avisos activos"
+  }
 }

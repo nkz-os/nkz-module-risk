@@ -10,7 +10,8 @@
  *   dashboard-widget — card in the tenant dashboard
  */
 import type { ModuleViewerSlots } from '@nekazari/sdk';
-import { ExampleSlot } from '../components/slots/ExampleSlot';
+import { ParcelAlertsSlot } from '../components/slots/ParcelAlertsSlot';
+import { AlertsDashboardWidget } from '../components/slots/AlertsDashboardWidget';
 
 const MODULE_ID = 'risk';
 
@@ -21,12 +22,20 @@ export const moduleSlots: ModuleViewerSlots = {
     {
       id: 'risk-context',
       moduleId: MODULE_ID,
-      component: 'ExampleSlot',
-      localComponent: ExampleSlot,
+      component: 'ParcelAlertsSlot',
+      localComponent: ParcelAlertsSlot,
       priority: 10,
     },
   ],
   'bottom-panel': [],
   'entity-tree': [],
-  'dashboard-widget': [],
+  'dashboard-widget': [
+    {
+      id: 'risk-dashboard',
+      moduleId: MODULE_ID,
+      component: 'AlertsDashboardWidget',
+      localComponent: AlertsDashboardWidget,
+      priority: 10,
+    },
+  ],
 };
