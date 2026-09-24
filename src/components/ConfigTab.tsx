@@ -89,7 +89,7 @@ const App: React.FC = () => {
     <div className="p-6 space-y-6 max-w-4xl">
       {/* ── Canales ── */}
       <section className="rounded-xl border border-nkz-border bg-white p-4 space-y-4">
-        <h2 className="font-semibold text-nkz-text">{t('config.channels')}</h2>
+        <h2 className="font-semibold text-nkz-text-primary">{t('config.channels')}</h2>
 
         <ChannelRow
           label={t('config.email')}
@@ -154,7 +154,7 @@ const App: React.FC = () => {
 
       {/* ── Suscripciones ── */}
       <section className="rounded-xl border border-nkz-border bg-white p-4 space-y-2">
-        <h2 className="font-semibold text-nkz-text">{t('config.subscriptions')}</h2>
+        <h2 className="font-semibold text-nkz-text-primary">{t('config.subscriptions')}</h2>
         {catalog.length === 0 ? (
           <p className="text-sm text-nkz-muted">{t('config.empty')}</p>
         ) : (
@@ -164,11 +164,11 @@ const App: React.FC = () => {
             return (
               <div
                 key={risk.alert_type}
-                className={`border rounded-lg p-3 ${active ? 'border-green-200 bg-nkz-success-soft/40' : 'border-nkz-border'}`}
+                className={`border rounded-lg p-3 ${active ? 'border-nkz-success-soft bg-nkz-success-soft' : 'border-nkz-border'}`}
               >
                 <div className="flex items-center justify-between">
                   <div>
-                    <p className="text-sm font-medium text-nkz-text">{risk.name}</p>
+                    <p className="text-sm font-medium text-nkz-text-primary">{risk.name}</p>
                     <p className="text-xs text-nkz-muted">{risk.alert_type}</p>
                   </div>
                   <button
@@ -191,7 +191,7 @@ const App: React.FC = () => {
                       max="100"
                       value={sub.user_threshold}
                       onChange={(e) => setThreshold(risk, parseInt(e.target.value, 10))}
-                      className="w-full accent-green-600"
+                      className="w-full accent-nkz-success"
                     />
                   </div>
                 )}
@@ -212,10 +212,10 @@ const ChannelRow: React.FC<{
 }> = ({ label, enabled, onToggle, children }) => (
   <div className="border-b border-nkz-border/50 pb-3 last:border-0">
     <div className="flex items-center justify-between mb-1">
-      <span className="text-sm font-medium text-nkz-text">{label}</span>
+      <span className="text-sm font-medium text-nkz-text-primary">{label}</span>
       <button
         onClick={() => onToggle(!enabled)}
-        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${enabled ? 'bg-green-600' : 'bg-nkz-bg-secondary'}`}
+        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${enabled ? 'bg-nkz-success' : 'bg-nkz-bg-secondary'}`}
       >
         <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
       </button>

@@ -61,5 +61,6 @@
     "atLeast": "at least",
     "conditions": "conditions",
     "noAggregate": "no aggregate"
-  }
+  },
+  "subtitle": "Risks and alerts for your parcels"
 }

@@ -59,7 +59,7 @@ const App: React.FC = () => {
   return (
     <div className="p-6 space-y-4 max-w-4xl">
       <form onSubmit={create} className="rounded-xl border border-nkz-border bg-white p-4 space-y-3">
-        <h2 className="font-semibold text-nkz-text">{t('integrations.new')}</h2>
+        <h2 className="font-semibold text-nkz-text-primary">{t('integrations.new')}</h2>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
           <input
             value={name}
@@ -112,7 +112,7 @@ const App: React.FC = () => {
           webhooks.map((w) => (
             <div key={w.id} className="flex items-center justify-between p-3">
               <div className="min-w-0">
-                <p className="text-sm font-medium text-nkz-text truncate">{w.name}</p>
+                <p className="text-sm font-medium text-nkz-text-primary truncate">{w.name}</p>
                 <p className="text-xs text-nkz-muted truncate">{w.url}</p>
               </div>
               <div className="flex items-center gap-3">
