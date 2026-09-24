@@ -29,6 +29,15 @@ def _value(entity: Dict[str, Any], name: str) -> Any:
     return attr
 
 
+def _first(entity: Dict[str, Any], *names: str) -> Any:
+    """Primer atributo presente (no None) de la lista de alias."""
+    for name in names:
+        v = _value(entity, name)
+        if v is not None:
+            return v
+    return None
+
+
 # ── Weather + GDD (delegadas a weather_source, ya portada) ──────────────
 
 
@@ -57,6 +66,11 @@ def fetch_parcel_soil(orion, parcel_id: str) -> Optional[Dict[str, Any]]:
                 "awc": awc,
                 "field_capacity": _value(e, "fieldCapacity"),
                 "wilting_point": _value(e, "wiltingPoint"),
+                # Conductividad eléctrica (salinidad) y temperatura del suelo.
+                # Hoy pueden no existir en el broker: se leen si están, si no
+                # quedan ausentes y la condición no se evalúa (sin inventar dato).
+                "ec": _first(e, "electroConductivity", "electricalConductivity", "ec"),
+                "temperature": _value(e, "soilTemperature"),
             }
     return None
 
@@ -219,6 +233,22 @@ def fetch_series(
     return None
 
 
+def fetch_leaf_wetness(conn, tenant_id: str, parcel_id: str, window_hours: int = 24):
+    """Horas de mojado foliar (LWD) estimadas por NHRH (RH>=90%) sobre la ventana.
+
+    Fuente derivada: no hay sensor de mojado, se estima a partir de la serie de
+    humedad relativa del feed de WeatherObserved (ya en telemetry_measurements).
+    """
+    from app.worker.models.lwd_estimator import estimate_lwd_nhrh
+
+    series = fetch_weather_series(conn, tenant_id, parcel_id, "humidity", window_hours * 60)
+    if not series:
+        return None
+    hourly_rh = [v for v, _t in series]
+    hours = estimate_lwd_nhrh(hourly_rh)
+    return {"hours": hours, "method": "estimated_NHRH"}
+
+
 # ── Registry de fuentes por parcela ────────────────────────────────────
 # Cada entrada es un callable (ctx, parcel_id, risk) -> data. Añadir una fuente
 # nueva = añadir una entrada aquí (no hay que tocar processor.py).
@@ -240,6 +270,9 @@ SOURCE_FETCHERS = {
     "weather_alerts": lambda ctx, pid, risk: fetch_weather_alerts(
         ctx["settings"].weather_api_url, ctx["tenant_id"], pid
     ),
+    "leaf_wetness": lambda ctx, pid, risk: fetch_leaf_wetness(
+        ctx["conn"], ctx["tenant_id"], pid
+    ),
 }
 
 
@@ -256,7 +289,7 @@ SOURCE_CATALOG = {
     },
     "soil": {
         "label": "Suelo",
-        "attributes": ["texture", "awc", "field_capacity", "wilting_point"],
+        "attributes": ["texture", "awc", "field_capacity", "wilting_point", "ec", "temperature"],
     },
     "ndvi": {"label": "Vegetación (índice)", "attributes": ["ndvi", "savi"]},
     "crop_health": {
@@ -268,5 +301,6 @@ SOURCE_CATALOG = {
     },
     "gdd": {"label": "Grados-día", "attributes": ["gdd_season_total", "days_accumulated"]},
     "weather_alerts": {"label": "Avisos meteorológicos", "attributes": []},
+    "leaf_wetness": {"label": "Mojado foliar", "attributes": ["hours"]},
     "telemetry": {"label": "Telemetría de dispositivo", "attributes": ["value"]},
 }

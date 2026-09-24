@@ -7,6 +7,8 @@ ALERT_TYPE = "Alert"
 class AlertCategory(str, Enum):
     WEATHER = "weather"
     AGRONOMIC = "agronomic"
+    DISEASE = "disease"
+    PEST = "pest"
     ROBOTIC = "robotic"
     ENERGY = "energy"
     SENSOR = "sensor"

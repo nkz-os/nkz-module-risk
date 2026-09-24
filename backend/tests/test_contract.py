@@ -11,7 +11,7 @@ def test_severity_values():
 
 def test_category_values():
     assert {c.value for c in AlertCategory} == {
-        "weather", "agronomic", "robotic", "energy", "sensor", "crop"}
+        "weather", "agronomic", "disease", "pest", "robotic", "energy", "sensor", "crop"}
 
 def test_alert_entity_id_shape():
     assert alert_entity_id("t1", "frost", "urn:ngsi-ld:AgriParcel:abc") == \
