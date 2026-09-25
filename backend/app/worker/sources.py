@@ -29,15 +29,6 @@ def _value(entity: Dict[str, Any], name: str) -> Any:
     return attr
 
 
-def _first(entity: Dict[str, Any], *names: str) -> Any:
-    """Primer atributo presente (no None) de la lista de alias."""
-    for name in names:
-        v = _value(entity, name)
-        if v is not None:
-            return v
-    return None
-
-
 # ── Weather + GDD (delegadas a weather_source, ya portada) ──────────────
 
 
@@ -52,26 +43,33 @@ def fetch_season_gdd(conn, tenant_id: str, parcel_id: str, season_start_doy: int
 # ── Soil (nkz-module-soil) ─────────────────────────────────────────────
 
 
+def _top_horizon(entity: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Horizonte superior (0-X cm) del AgriSoilExtended, que es donde viven
+    textura/awc/fieldCapacity/wiltingPoint/ec (no a nivel de entidad)."""
+    horizons = _value(entity, "horizons")
+    if isinstance(horizons, list) and horizons and isinstance(horizons[0], dict):
+        return horizons[0]
+    return None
+
+
 def fetch_parcel_soil(orion, parcel_id: str) -> Optional[Dict[str, Any]]:
     for etype in ("AgriSoilExtended", "AgriSoil"):
         rows = query_by_parcel(orion, etype, parcel_id, limit=1)
-        if rows:
-            e = rows[0]
-            awc = _value(e, "awc")
-            if awc is None:
-                awc = _value(e, "availableWaterCapacity")
-            return {
-                "type": etype,
-                "texture": _value(e, "texture"),
-                "awc": awc,
-                "field_capacity": _value(e, "fieldCapacity"),
-                "wilting_point": _value(e, "wiltingPoint"),
-                # Conductividad eléctrica (salinidad) y temperatura del suelo.
-                # Hoy pueden no existir en el broker: se leen si están, si no
-                # quedan ausentes y la condición no se evalúa (sin inventar dato).
-                "ec": _first(e, "electroConductivity", "electricalConductivity", "ec"),
-                "temperature": _value(e, "soilTemperature"),
-            }
+        if not rows:
+            continue
+        e = rows[0]
+        h = _top_horizon(e)
+        if h is None:
+            continue
+        return {
+            "type": etype,
+            "texture": h.get("usdaTextureClass"),
+            "awc": h.get("availableWaterCapacity"),
+            "field_capacity": h.get("fieldCapacity"),
+            "wilting_point": h.get("wiltingPoint"),
+            # EC (salinidad) del horizonte — viene de LUCAS (ec_ds_m, dS/m).
+            "ec": h.get("ec"),
+        }
     return None
 
 
@@ -300,7 +298,7 @@ SOURCE_CATALOG = {
     },
     "soil": {
         "label": "Suelo",
-        "attributes": ["texture", "awc", "field_capacity", "wilting_point", "ec", "temperature"],
+        "attributes": ["texture", "awc", "field_capacity", "wilting_point", "ec"],
     },
     "ndvi": {"label": "Vegetación (índice)", "attributes": ["ndvi", "savi"]},
     "crop_health": {

@@ -13,23 +13,32 @@ def _orion(returned):
 def test_fetch_parcel_soil_prefers_extended():
     r = sources.fetch_parcel_soil(_orion([{
         "id": "urn:x", "type": "AgriSoilExtended",
-        "texture": {"value": "clay"},
-        "awc": {"value": 120.0},
-        "fieldCapacity": {"value": 0.3},
-        "wiltingPoint": {"value": 0.1},
+        "horizons": {"value": [{
+            "usdaTextureClass": "clay",
+            "availableWaterCapacity": 120.0,
+            "fieldCapacity": 0.3,
+            "wiltingPoint": 0.1,
+            "ec": 1.5,
+        }]},
     }]), "urn:ngsi-ld:AgriParcel:abc")
     assert r["type"] == "AgriSoilExtended"
     assert r["texture"] == "clay"
     assert r["awc"] == 120.0
+    assert r["field_capacity"] == 0.3
     assert r["wilting_point"] == 0.1
+    assert r["ec"] == 1.5
 
 
-def test_fetch_parcel_soil_falls_back_to_availableWaterCapacity():
+def test_fetch_parcel_soil_reads_top_horizon():
     r = sources.fetch_parcel_soil(_orion([{
         "id": "urn:x", "type": "AgriSoil",
-        "availableWaterCapacity": {"value": 88.0},
+        "horizons": {"value": [
+            {"availableWaterCapacity": 88.0, "usdaTextureClass": "sandy_loam"},
+            {"availableWaterCapacity": 50.0},
+        ]},
     }]), "urn:ngsi-ld:AgriParcel:abc")
     assert r["awc"] == 88.0
+    assert r["texture"] == "sandy_loam"
 
 
 def test_fetch_parcel_ndvi_extracts_value():
