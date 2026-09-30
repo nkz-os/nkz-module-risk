@@ -26,7 +26,7 @@ def _get_catalog(conn) -> List[Dict[str, Any]]:
     with conn.cursor() as cur:
         cur.execute(
             "SELECT alert_type, name, category, model_type, model_config, "
-            "severity_levels, target_sdm_type, data_sources "
+            "severity_levels, target_sdm_type, data_sources, applicable_crop_groups "
             "FROM risk.alert_catalog WHERE is_active = true"
         )
         return [dict(r) for r in cur.fetchall()]
@@ -34,6 +34,24 @@ def _get_catalog(conn) -> List[Dict[str, Any]]:
 
 def _get_entities(orion: SyncOrionClient, entity_type: str) -> List[Dict[str, Any]]:
     return orion.query_entities(type=entity_type, limit=200)
+
+
+def _parcel_crop_group(orion: SyncOrionClient, entity: Dict[str, Any]) -> str | None:
+    """Resuelve el crop_group de una parcela desde hasAgriCrop -> AgriCrop.category."""
+    rel = entity.get("hasAgriCrop")
+    crop_id = rel.get("object") if isinstance(rel, dict) else rel
+    if not crop_id or not isinstance(crop_id, str):
+        return None
+    try:
+        crop = orion.get_entity(crop_id)
+    except Exception:
+        return None
+    if not crop:
+        return None
+    category = crop.get("category")
+    if isinstance(category, dict):
+        category = category.get("value")
+    return category or None
 
 
 def _prepare_data_sources(tenant_id, risk, entity, orion, conn, settings) -> Dict[str, Any]:
@@ -128,32 +146,6 @@ def _evaluate_crop_stress(orion, tenant_id, settings) -> tuple[int, int]:
     return evaluated, errors
 
 
-def _evaluate_disease_risks(orion, tenant_id, settings) -> tuple[int, int]:
-    """Modelos epidemiológicos (mildiu, oídio, etc.) por parcela desde weather."""
-    from app.worker.disease_evaluator import evaluate_disease_risks
-
-    evaluated = errors = 0
-    for parcel in _get_entities(orion, "AgriParcel"):
-        parcel_id = parcel.get("id")
-        if not parcel_id:
-            continue
-        weather = sources.fetch_parcel_weather(settings.orion_ld_url, tenant_id, parcel_id)
-        if not weather:
-            continue
-        try:
-            published = evaluate_disease_risks(
-                tenant_id,
-                weather_data=weather,
-                parcel_id=parcel_id,
-                fidelity=weather.get("data_fidelity", "parcel_weather"),
-            )
-            evaluated += len(published)
-        except Exception as e:
-            logger.warning("disease eval failed for %s: %s", parcel_id, e)
-            errors += 1
-    return evaluated, errors
-
-
 def evaluate_risks_for_tenant(conn, tenant_id: str) -> Dict[str, int]:
     """Evalúa todos los riesgos activos del catálogo para un tenant y publica Alert."""
     settings = get_settings()
@@ -176,6 +168,13 @@ def evaluate_risks_for_tenant(conn, tenant_id: str) -> Dict[str, int]:
                 entity_id = entity.get("id")
                 if not entity_id:
                     continue
+
+                applicable = risk.get("applicable_crop_groups") or []
+                if applicable:
+                    crop_group = _parcel_crop_group(orion, entity)
+                    if crop_group not in applicable:
+                        continue
+
                 try:
                     data_sources = _prepare_data_sources(tenant_id, risk, entity, orion, conn, settings)
                     result = model.evaluate(
@@ -221,14 +220,6 @@ def evaluate_risks_for_tenant(conn, tenant_id: str) -> Dict[str, int]:
             errors += err
         except Exception as e:
             logger.warning("crop-stress evaluation skipped: %s", e)
-
-        # ── Modelos de enfermedad (epidemiológicos) — fuente externa ──
-        try:
-            de, err = _evaluate_disease_risks(orion, tenant_id, settings)
-            evaluated += de
-            errors += err
-        except Exception as e:
-            logger.warning("disease evaluation skipped: %s", e)
 
     return {"evaluated": evaluated, "errors": errors}
 
