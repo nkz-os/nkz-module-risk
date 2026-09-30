@@ -77,7 +77,8 @@ def get_catalog(tenant_id: str = Depends(get_tenant_id)):
             cur.execute(
                 """
                 SELECT alert_type, name, description, category, model_type,
-                       severity_levels, is_active, tenant_id
+                       severity_levels, is_active, tenant_id,
+                       applicable_crop_groups, documentation
                 FROM risk.alert_catalog
                 WHERE is_active = true
                   AND (tenant_id IS NULL OR tenant_id = %s)
@@ -130,5 +131,82 @@ def create_custom_risk(
             )
             conn.commit()
             return {"alert_type": risk_code, "tenant_id": tenant_id}
+    finally:
+        conn.close()
+
+
+@router.patch("/catalog/{alert_type}")
+def update_catalog_entry(
+    alert_type: str,
+    body: dict,
+    tenant_id: str = Depends(get_tenant_id),
+    _auth=Depends(require_roles("TenantAdmin", "PlatformAdmin")),
+):
+    """Actualiza campos editables de una ficha (soft, sin tocar model_type)."""
+    allowed = {"is_active", "applicable_crop_groups", "documentation", "description"}
+    fields = {k: v for k, v in body.items() if k in allowed}
+    if not fields:
+        raise HTTPException(400, "no editable fields provided")
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT tenant_id FROM risk.alert_catalog WHERE alert_type = %s",
+                (alert_type,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "alert_type not found")
+            if row["tenant_id"] is not None and row["tenant_id"] != tenant_id:
+                raise HTTPException(403, "cannot edit another tenant's risk")
+
+            set_clauses = []
+            params = []
+            for k, v in fields.items():
+                if k == "applicable_crop_groups":
+                    set_clauses.append("applicable_crop_groups = %s::text[]")
+                    params.append(v if isinstance(v, list) else [v])
+                elif k == "documentation":
+                    set_clauses.append("documentation = %s::jsonb")
+                    params.append(json.dumps(v))
+                else:
+                    set_clauses.append(f"{k} = %s")
+                    params.append(v)
+            params.append(alert_type)
+            cur.execute(
+                f"UPDATE risk.alert_catalog SET {', '.join(set_clauses)} WHERE alert_type = %s",
+                params,
+            )
+            conn.commit()
+    finally:
+        conn.close()
+    return {"alert_type": alert_type, "updated": sorted(fields)}
+
+
+@router.delete("/catalog/{alert_type}", status_code=204)
+def delete_catalog_entry(
+    alert_type: str,
+    tenant_id: str = Depends(get_tenant_id),
+    _auth=Depends(require_roles("TenantAdmin", "PlatformAdmin")),
+):
+    """Soft-delete: is_active=false (no borrar la fila, preserva historial)."""
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT tenant_id FROM risk.alert_catalog WHERE alert_type = %s",
+                (alert_type,),
+            )
+            row = cur.fetchone()
+            if not row:
+                raise HTTPException(404, "alert_type not found")
+            if row["tenant_id"] is not None and row["tenant_id"] != tenant_id:
+                raise HTTPException(403, "cannot delete another tenant's risk")
+            cur.execute(
+                "UPDATE risk.alert_catalog SET is_active = false WHERE alert_type = %s",
+                (alert_type,),
+            )
+            conn.commit()
     finally:
         conn.close()
