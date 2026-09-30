@@ -8,6 +8,7 @@ import { useModuleApi, AlertItem, CatalogItem } from './services/api';
 import ConfigTab from './components/ConfigTab';
 import IntegrationsTab from './components/IntegrationsTab';
 import CustomTab from './components/CustomTab';
+import CatalogTab from './components/CatalogTab';
 
 const SEV: Record<string, string> = {
   critical: 'bg-nkz-danger-soft text-nkz-danger-strong',
@@ -41,6 +42,7 @@ const shortId = (urn?: string): string => (urn ? urn.split(':').pop() ?? urn : '
 
 const TABS = [
   { id: 'monitor', label: 'monitor.tab' },
+  { id: 'catalog', label: 'catalog.tab' },
   { id: 'config', label: 'config.tab' },
   { id: 'custom', label: 'custom.tab' },
   { id: 'integrations', label: 'integrations.tab' },
@@ -160,6 +162,7 @@ const App: React.FC = () => {
       </nav>
 
       {tab === 'monitor' && <Monitor />}
+      {tab === 'catalog' && <CatalogTab />}
       {tab === 'config' && <ConfigTab />}
       {tab === 'custom' && <CustomTab />}
       {tab === 'integrations' && <IntegrationsTab />}

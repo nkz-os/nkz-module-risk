@@ -20,6 +20,9 @@ export interface CatalogItem {
   description?: string | null;
   category: string;
   model_type?: string | null;
+  is_active?: boolean;
+  applicable_crop_groups?: string[];
+  documentation?: Record<string, unknown> | null;
 }
 
 export interface Subscription {
@@ -91,5 +94,7 @@ export function useModuleApi() {
     deleteWebhook: (id: string) => client.delete<void>(`/webhooks/${id}`),
     getCatalogSources: () => client.get<SourceCatalog>('/catalog/sources'),
     createCustomRisk: (d: { name: string; description?: string; category?: string; target_sdm_type?: string; data_sources: string[]; conditions: RiskConditionGroup }) => client.post<{ alert_type: string }>('/catalog/custom', d),
+    updateCatalog: (alert_type: string, d: Partial<CatalogItem>) => client.patch<CatalogItem>(`/catalog/${alert_type}`, d),
+    deleteCatalog: (alert_type: string) => client.delete<void>(`/catalog/${alert_type}`),
   };
 }

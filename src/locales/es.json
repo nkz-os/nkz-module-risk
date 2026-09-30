@@ -70,5 +70,24 @@
   "widget": {
     "title": "Avisos recientes",
     "empty": "Sin avisos activos"
+  },
+  "catalog": {
+    "tab": "Catálogo",
+    "description": "Fichas de riesgos: activa o desactiva, cultivos aplicables y documentación.",
+    "cropGroups": "Cultivos",
+    "active": "Activo",
+    "inactive": "Inactivo",
+    "remove": "Quitar",
+    "category": {
+      "disease": "Enfermedades",
+      "pest": "Plagas",
+      "weather": "Meteorología",
+      "agronomic": "Agronómicos",
+      "robotic": "Robótica",
+      "energy": "Energía",
+      "sensor": "Sensores",
+      "crop": "Cultivo",
+      "default": "Categoría"
+    }
   }
 }

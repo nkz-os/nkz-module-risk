@@ -70,5 +70,24 @@
   "widget": {
     "title": "Recent alerts",
     "empty": "No active alerts"
+  },
+  "catalog": {
+    "tab": "Catalog",
+    "description": "Risk definitions: activate or deactivate, applicable crops and documentation.",
+    "cropGroups": "Crops",
+    "active": "Active",
+    "inactive": "Inactive",
+    "remove": "Remove",
+    "category": {
+      "disease": "Diseases",
+      "pest": "Pests",
+      "weather": "Weather",
+      "agronomic": "Agronomic",
+      "robotic": "Robotic",
+      "energy": "Energy",
+      "sensor": "Sensors",
+      "crop": "Crop",
+      "default": "Category"
+    }
   }
 }
