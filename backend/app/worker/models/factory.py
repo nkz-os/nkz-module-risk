@@ -21,6 +21,7 @@ try:
     from .gdd_pest_model import GDDPestRiskModel
     from .weather_alert_model import WeatherAlertRiskModel
     from .threshold_model import ThresholdRiskModel
+    from .disease_adapter import DiseaseModelAdapter
 except ImportError as e:
     logger.warning(f"Failed to import risk models: {e}")
     AgronomicRiskModel = None
@@ -33,6 +34,7 @@ except ImportError as e:
     GDDPestRiskModel = None
     WeatherAlertRiskModel = None
     ThresholdRiskModel = None
+    DiseaseModelAdapter = None
 
 # Models dispatched by model_type (takes precedence over domain mapping)
 MODEL_TYPE_MAP = {
@@ -43,6 +45,10 @@ MODEL_TYPE_MAP = {
     'gdd_pest': GDDPestRiskModel,
     'weather_alert': WeatherAlertRiskModel,
     'threshold': ThresholdRiskModel,
+    'gubler_pm': DiseaseModelAdapter,
+    'magarey_mildew': DiseaseModelAdapter,
+    'mills_scab': DiseaseModelAdapter,
+    'tomcast_alternaria': DiseaseModelAdapter,
 }
 
 # Fallback dispatch by risk_domain
