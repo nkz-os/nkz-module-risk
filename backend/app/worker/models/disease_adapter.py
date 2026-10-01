@@ -57,26 +57,31 @@ class DiseaseModelAdapter:
         )
 
         temp_f = float(temp) if temp is not None else 0.0
-        if self.risk_code == "powdery_mildew":
+        daily_means = weather.get("daily_temp_means")
+        if not daily_means:
             daily_means = [temp_f] if temp is not None else []
+        lwd_hours = weather.get("lwd_hours", _lwd_from_humidity(humidity))
+        precip_48h = weather.get("precip_48h", float(precip) if precip else 0.0)
+
+        if self.risk_code == "powdery_mildew":
             result = gubler_pm.evaluate_gubler_pm(daily_means=daily_means, fidelity=fidelity)
         elif self.risk_code == "downy_mildew":
             result = magarey_mildew.evaluate_magarey_mildew(
-                precip_mm_48h=float(precip) if precip else 0.0,
+                precip_mm_48h=float(precip_48h),
                 mean_temp_48h=temp_f,
-                lwd_hours=_lwd_from_humidity(humidity),
+                lwd_hours=float(lwd_hours),
                 fidelity=fidelity,
             )
         elif self.risk_code == "apple_scab":
             result = mills_scab.evaluate_mills_scab(
                 mean_temp=temp_f,
-                lwd_hours=_lwd_from_humidity(humidity),
+                lwd_hours=float(lwd_hours),
                 fidelity=fidelity,
             )
         elif self.risk_code == "alternaria":
             result = tomcast_alternaria.evaluate_tomcast(
                 mean_temp=temp_f,
-                lwd_hours=_lwd_from_humidity(humidity),
+                lwd_hours=float(lwd_hours),
                 fidelity=fidelity,
             )
         else:

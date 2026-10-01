@@ -86,3 +86,19 @@ def test_fetch_weather_alerts():
         r = sources.fetch_weather_alerts("http://w", "t1", "urn:p:1")
         assert r == [{"id": "a"}]
         assert get.call_args[0][0] == "http://w/api/weather/parcel/urn:p:1/alerts"
+
+
+def test_fetch_daily_temp_means_aggregates_by_day(monkeypatch):
+    series = [
+        (20.0, "2026-09-28T10:00:00"),
+        (24.0, "2026-09-28T22:00:00"),
+        (25.0, "2026-09-29T10:00:00"),
+        (27.0, "2026-09-29T22:00:00"),
+    ]
+    monkeypatch.setattr(sources, "fetch_weather_series", lambda *a, **k: series)
+    assert sources.fetch_daily_temp_means(None, "t", "p") == [22.0, 26.0]
+
+
+def test_fetch_daily_temp_means_empty(monkeypatch):
+    monkeypatch.setattr(sources, "fetch_weather_series", lambda *a, **k: None)
+    assert sources.fetch_daily_temp_means(None, "t", "p") is None

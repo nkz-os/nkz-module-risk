@@ -21,6 +21,10 @@ logger = logging.getLogger(__name__)
 
 PUBLISH_THRESHOLD = 50.0
 
+# model_types de los modelos epidemiológicos del catálogo, que consumen series
+# temporales (temperatura diaria + LWD + lluvia 48h) en vez de valores puntuales.
+DISEASE_MODEL_TYPES = {"gubler_pm", "magarey_mildew", "mills_scab", "tomcast_alternaria"}
+
 
 def _get_catalog(conn) -> List[Dict[str, Any]]:
     with conn.cursor() as cur:
@@ -86,6 +90,20 @@ def _prepare_data_sources(tenant_id, risk, entity, orion, conn, settings) -> Dic
             data.setdefault(src, {})[f"__series__{attr}"] = series
         else:
             logger.debug("no series for %s.%s (duration_minutes unsupported)", src, attr)
+
+    # Series para modelos epidemiológicos (temperatura diaria + LWD + lluvia 48h).
+    if risk.get("model_type") in DISEASE_MODEL_TYPES and parcel_id:
+        w = data.setdefault("weather", {})
+        daily = sources.fetch_daily_temp_means(conn, tenant_id, parcel_id, days=5)
+        if daily:
+            w["daily_temp_means"] = daily
+        lwd = sources.fetch_leaf_wetness(conn, tenant_id, parcel_id, window_hours=48)
+        if lwd:
+            w["lwd_hours"] = lwd["hours"]
+        precip = sources.fetch_weather_series(conn, tenant_id, parcel_id, "precip_mm", 48 * 60)
+        if precip:
+            w["precip_48h"] = round(sum(v for v, _ in precip), 1)
+
     return data
 
 

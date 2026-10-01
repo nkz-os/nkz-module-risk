@@ -258,6 +258,23 @@ def fetch_leaf_wetness(conn, tenant_id: str, parcel_id: str, window_hours: int =
     return {"hours": hours, "method": "estimated_NHRH"}
 
 
+def fetch_daily_temp_means(conn, tenant_id: str, parcel_id: str, days: int = 5) -> Optional[List[float]]:
+    """Medias diarias de temperatura (últimos N días), más reciente al final.
+
+    Agrega la serie de temp_avg (airTemperature) del feed de WeatherObserved en
+    medias por día, para los modelos epidemiológicos basados en temperatura
+    (Gubler-Thomas). Devuelve None si no hay serie disponible.
+    """
+    series = fetch_weather_series(conn, tenant_id, parcel_id, "temp_avg", days * 24 * 60)
+    if not series:
+        return None
+    by_day: Dict[str, List[float]] = {}
+    for v, ts in series:
+        by_day.setdefault(str(ts)[:10], []).append(v)
+    out = [round(sum(vals) / len(vals), 1) for _, vals in sorted(by_day.items())]
+    return out or None
+
+
 # ── Registry de fuentes por parcela ────────────────────────────────────
 # Cada entrada es un callable (ctx, parcel_id, risk) -> data. Añadir una fuente
 # nueva = añadir una entrada aquí (no hay que tocar processor.py).

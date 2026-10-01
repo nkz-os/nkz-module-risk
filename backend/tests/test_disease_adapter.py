@@ -49,3 +49,16 @@ def test_unknown_risk_code():
         data_sources=_weather(),
     )
     assert r["probability_score"] == 0.0
+
+
+def test_adapter_uses_daily_temp_means():
+    # 5 días consecutivos en 20-30°C → HIGH (la versión puntual daría LOW).
+    m = DiseaseModelAdapter("powdery_mildew", {})
+    r = m.evaluate(
+        entity_id="e",
+        entity_type="AgriParcel",
+        tenant_id="t",
+        data_sources={"weather": {"daily_temp_means": [25.0, 24.0, 26.0, 27.0, 28.0]}},
+    )
+    assert r["severity"] == "high"
+    assert r["probability_score"] == 80.0
