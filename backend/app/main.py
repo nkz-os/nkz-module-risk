@@ -16,6 +16,61 @@ from app.api.internal import router as internal_router
 logger = logging.getLogger(__name__)
 
 
+async def _ensure_crop_assignment_subscription() -> None:
+    """Registra la suscripción Orion a AgriParcel.hasAgriCrop (idempotente).
+
+    Al asignar (o reasignar) cultivo, Orion notifica /api/risk/internal/notify,
+    que evalúa los riesgos de esa parcela inmediatamente. El batch horario
+    sigue siendo el fallback si Orion no entrega la notificación.
+    """
+    from nkz_platform_sdk.subscriptions import SubscriptionRegistrar
+
+    from app.db import get_conn
+
+    settings = get_settings()
+    secret = settings.internal_service_secret
+    if not secret:
+        logger.warning(
+            "INTERNAL_SERVICE_SECRET not set — subscription notifications "
+            "would fail auth; skipping crop-assignment subscription"
+        )
+        return
+
+    try:
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT DISTINCT tenant_id FROM tenants "
+                    "WHERE status = 'active' AND tenant_id IS NOT NULL"
+                )
+                tenants = [r["tenant_id"] for r in cur.fetchall()]
+        finally:
+            conn.close()
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("tenant list for subscription failed: %s", exc)
+        return
+
+    registrar = SubscriptionRegistrar(
+        orion_url=settings.orion_ld_url,
+        notification_url=(
+            f"http://risk-module-api-service:8000"
+            f"{settings.api_prefix}/internal/notify"
+        ),
+        subscriptions=[
+            {"type": "AgriParcel", "watched_attributes": ["hasAgriCrop"], "throttling": 30}
+        ],
+        module_name="risk",
+        context_url=settings.context_url,
+        notification_headers={"X-Internal-Service-Secret": secret},
+    )
+    try:
+        result = await registrar.ensure_all(tenants)
+        logger.info("crop-assignment subscription ensured: %s", result)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("crop-assignment subscription setup failed: %s", exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Application lifespan handler for startup/shutdown events."""
@@ -23,6 +78,7 @@ async def lifespan(app: FastAPI):
     logger.info("%s v%s starting — prefix=%s debug=%s",
                 settings.app_name, settings.app_version,
                 settings.api_prefix, settings.debug)
+    await _ensure_crop_assignment_subscription()
     yield
     logger.info("%s shutting down", settings.app_name)
 

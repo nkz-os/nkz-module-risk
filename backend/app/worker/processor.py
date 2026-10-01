@@ -168,8 +168,18 @@ def _evaluate_crop_stress(orion, tenant_id, settings) -> tuple[int, int]:
     return evaluated, errors
 
 
-def evaluate_risks_for_tenant(conn, tenant_id: str) -> Dict[str, int]:
-    """Evalúa todos los riesgos activos del catálogo para un tenant y publica Alert."""
+def _evaluate_risks(
+    conn,
+    tenant_id: str,
+    parcel_filter: str | None = None,
+    include_crop_stress: bool = True,
+) -> Dict[str, int]:
+    """Evalúa los riesgos del catálogo y publica Alert.
+
+    `parcel_filter` (opcional) limita la evaluación a una única parcela — lo usa
+    el handler de notificaciones (Fase 2) al asignar cultivo. `include_crop_stress`
+    se desactiva en ese caso (el estrés de cultivo no lo dispara la asignación).
+    """
     settings = get_settings()
     catalog = _get_catalog(conn)
     if not catalog:
@@ -189,6 +199,9 @@ def evaluate_risks_for_tenant(conn, tenant_id: str) -> Dict[str, int]:
             for entity in _get_entities(orion, risk["target_sdm_type"]):
                 entity_id = entity.get("id")
                 if not entity_id:
+                    continue
+
+                if parcel_filter and entity_id != parcel_filter:
                     continue
 
                 applicable = risk.get("applicable_crop_groups") or []
@@ -236,14 +249,25 @@ def evaluate_risks_for_tenant(conn, tenant_id: str) -> Dict[str, int]:
                     errors += 1
 
         # ── Estrés de cultivo (crop-health) — fuente externa, sin modelo factory ──
-        try:
-            ce, err = _evaluate_crop_stress(orion, tenant_id, settings)
-            evaluated += ce
-            errors += err
-        except Exception as e:
-            logger.warning("crop-stress evaluation skipped: %s", e)
+        if include_crop_stress:
+            try:
+                ce, err = _evaluate_crop_stress(orion, tenant_id, settings)
+                evaluated += ce
+                errors += err
+            except Exception as e:
+                logger.warning("crop-stress evaluation skipped: %s", e)
 
     return {"evaluated": evaluated, "errors": errors}
+
+
+def evaluate_risks_for_tenant(conn, tenant_id: str) -> Dict[str, int]:
+    """Evalúa todos los riesgos activos del catálogo para un tenant (batch)."""
+    return _evaluate_risks(conn, tenant_id)
+
+
+def evaluate_risks_for_parcel(conn, tenant_id: str, parcel_id: str) -> Dict[str, int]:
+    """Evalúa los riesgos del catálogo para UNA parcela (disparado por notificación)."""
+    return _evaluate_risks(conn, tenant_id, parcel_filter=parcel_id, include_crop_stress=False)
 
 
 def main() -> None:
