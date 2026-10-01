@@ -102,7 +102,11 @@ def _prepare_data_sources(tenant_id, risk, entity, orion, conn, settings) -> Dic
             w["lwd_hours"] = lwd["hours"]
         precip = sources.fetch_weather_series(conn, tenant_id, parcel_id, "precip_mm", 48 * 60)
         if precip:
-            w["precip_48h"] = round(sum(v for v, _ in precip), 1)
+            # Cada valor es mm de la hora precedente; el feed muestrea ~2h, así
+            # que la suma infra-cuenta ~a la mitad. Escalar por el intervalo real.
+            w["precip_48h"] = round(
+                sum(v for v, _ in precip) * sources._average_interval_hours(precip), 1
+            )
 
     return data
 

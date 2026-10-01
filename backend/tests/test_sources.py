@@ -102,3 +102,32 @@ def test_fetch_daily_temp_means_aggregates_by_day(monkeypatch):
 def test_fetch_daily_temp_means_empty(monkeypatch):
     monkeypatch.setattr(sources, "fetch_weather_series", lambda *a, **k: None)
     assert sources.fetch_daily_temp_means(None, "t", "p") is None
+
+
+def test_average_interval_hours():
+    series = [
+        (70.0, "2026-09-29T00:00:00"),
+        (92.0, "2026-09-29T02:00:00"),
+        (95.0, "2026-09-29T04:00:00"),
+    ]
+    assert sources._average_interval_hours(series) == 2.0
+
+
+def test_average_interval_hours_ignores_large_gap():
+    series = [
+        (70.0, "2026-09-29T00:00:00"),
+        (92.0, "2026-09-29T02:00:00"),
+        (95.0, "2026-09-29T20:00:00"),  # hueco de 18h -> ignorado
+    ]
+    assert sources._average_interval_hours(series) == 2.0
+
+
+def test_fetch_leaf_wetness_scales_by_interval(monkeypatch):
+    series = [
+        (92.0, "2026-09-29T00:00:00"),
+        (95.0, "2026-09-29T02:00:00"),
+        (80.0, "2026-09-29T04:00:00"),
+    ]
+    monkeypatch.setattr(sources, "fetch_weather_series", lambda *a, **k: series)
+    r = sources.fetch_leaf_wetness(None, "t", "p", window_hours=24)
+    assert r["hours"] == 4.0  # 2 muestras >= 90% * intervalo 2h

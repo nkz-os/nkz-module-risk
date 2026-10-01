@@ -247,6 +247,8 @@ def fetch_leaf_wetness(conn, tenant_id: str, parcel_id: str, window_hours: int =
 
     Fuente derivada: no hay sensor de mojado, se estima a partir de la serie de
     humedad relativa del feed de WeatherObserved (ya en telemetry_measurements).
+    El feed muestrea ~cada 2h (no 1h), así que el conteo se escala por el
+    intervalo real entre muestras para no infra-contar las horas de mojado.
     """
     from app.worker.models.lwd_estimator import estimate_lwd_nhrh
 
@@ -254,8 +256,25 @@ def fetch_leaf_wetness(conn, tenant_id: str, parcel_id: str, window_hours: int =
     if not series:
         return None
     hourly_rh = [v for v, _t in series]
-    hours = estimate_lwd_nhrh(hourly_rh)
+    count = estimate_lwd_nhrh(hourly_rh)
+    hours = round(count * _average_interval_hours(series), 1)
     return {"hours": hours, "method": "estimated_NHRH"}
+
+
+def _average_interval_hours(series: List[tuple]) -> float:
+    """Intervalo medio (h) entre muestras consecutivas; ignora huecos > 6h."""
+    from datetime import datetime
+
+    prev = None
+    intervals: List[float] = []
+    for _, ts in series:
+        t = ts if isinstance(ts, datetime) else datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if prev is not None:
+            d = (t - prev).total_seconds() / 3600.0
+            if 0 < d < 6.0:
+                intervals.append(d)
+        prev = t
+    return (sum(intervals) / len(intervals)) if intervals else 1.0
 
 
 def fetch_daily_temp_means(conn, tenant_id: str, parcel_id: str, days: int = 5) -> Optional[List[float]]:
