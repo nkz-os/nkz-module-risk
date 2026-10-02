@@ -6,6 +6,7 @@ además una lista de targets (ver webhooks.py).
 """
 from fastapi import APIRouter, Depends, HTTPException
 from pydantic import BaseModel
+from psycopg2.extras import Json
 
 from app.db import get_conn
 from app.middleware import get_tenant_id
@@ -68,8 +69,8 @@ def put_channels(body: ChannelsIn, tenant_id: str = Depends(get_tenant_id)):
                     webhook=EXCLUDED.webhook, telegram=EXCLUDED.telegram, updated_at=now()
                 RETURNING email, push, zulip, webhook, telegram
                 """,
-                (tenant_id, merged["email"], merged["push"], merged["zulip"],
-                 merged["webhook"], merged["telegram"]),
+                (tenant_id, Json(merged["email"]), Json(merged["push"]), Json(merged["zulip"]),
+                 Json(merged["webhook"]), Json(merged["telegram"])),
             )
             conn.commit()
             return dict(cur.fetchone())
