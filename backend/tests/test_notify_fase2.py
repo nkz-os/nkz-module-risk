@@ -63,3 +63,22 @@ def test_notify_returns_204_without_evaluating_sync():
             app.dependency_overrides.pop(verify_internal_secret, None)
     # _eval_parcel_background se programa vía run_in_executor (no se espera);
     # el handler devuelve 204 sin ejecutar la evaluación en línea.
+
+
+def test_notify_dispatches_alert_in_background():
+    app.dependency_overrides[verify_internal_secret] = lambda: None
+    with patch("app.api.internal._dispatch_alert_background") as bg_mock, patch(
+        "app.api.internal._eval_parcel_background"
+    ) as eval_mock:
+        try:
+            with TestClient(app) as c:
+                r = c.post(
+                    "/api/risk/internal/notify",
+                    json={"data": [{"id": "urn:ngsi-ld:Alert:x", "type": "Alert"}]},
+                    headers={"NGSILD-Tenant": "montiko"},
+                )
+                assert r.status_code == 204
+        finally:
+            app.dependency_overrides.pop(verify_internal_secret, None)
+    # se programa el dispatch de Alert (no la evaluación de parcela)
+    assert eval_mock.call_count == 0
