@@ -87,16 +87,34 @@ def _eval_parcel_background(tenant_hint: str | None, parcel_id: str) -> None:
         conn.close()
 
 
+def _dispatch_alert_background(tenant_hint: str | None, entity: dict) -> None:
+    """Entrega una Alert (de cualquier productor) en segundo plano (hilo)."""
+    from app.dispatcher.alert_router import dispatch_alert_entity
+
+    conn = get_conn()
+    try:
+        tenant_id = tenant_hint or _resolve_tenant_for_parcel(conn, entity.get("id"))
+        if not tenant_id:
+            logger.warning("notify: cannot resolve tenant for alert %s", entity.get("id"))
+            return
+        dispatch_alert_entity(tenant_id, entity)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("notify: alert dispatch failed %s: %s", entity.get("id"), exc)
+    finally:
+        conn.close()
+
+
 @router.post("/notify", status_code=204)
 async def ngsi_ld_notify(
     request: Request,
     x_ngsild_tenant: str | None = Header(None, alias="NGSILD-Tenant"),
 ):
-    """Recibe notificaciones NGSI-LD (AgriParcel.hasAgriCrop) y evalúa la parcela.
+    """Recibe notificaciones NGSI-LD y despacha/evalúa en segundo plano.
 
-    Contrato Orion-LD: responder 204 SIN esperar la evaluación. La evaluación se
-    lanza fire-and-forget en un hilo (con conexión propia) para no bloquear la
-    respuesta ni superar el timeout de Orion.
+    - Alert -> NotificationDispatcher (único camino de entrega).
+    - AgriParcel -> evaluación de riesgo de esa parcela (asignación de cultivo).
+
+    Contrato Orion-LD: responder 204 SIN esperar; el trabajo corre en un hilo.
     """
     try:
         payload = await request.json()
@@ -109,11 +127,14 @@ async def ngsi_ld_notify(
 
     loop = asyncio.get_running_loop()
     for entity in data:
-        if not isinstance(entity, dict) or entity.get("type") != "AgriParcel":
+        if not isinstance(entity, dict):
             continue
-        parcel_id = entity.get("id")
-        if not parcel_id:
-            continue
-        loop.run_in_executor(None, _eval_parcel_background, x_ngsild_tenant, parcel_id)
+        etype = entity.get("type")
+        if etype == "Alert":
+            loop.run_in_executor(None, _dispatch_alert_background, x_ngsild_tenant, entity)
+        elif etype == "AgriParcel":
+            parcel_id = entity.get("id")
+            if parcel_id:
+                loop.run_in_executor(None, _eval_parcel_background, x_ngsild_tenant, parcel_id)
 
     return Response(status_code=204)

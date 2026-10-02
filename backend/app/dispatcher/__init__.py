@@ -51,7 +51,7 @@ class NotificationDispatcher:
             except Exception as e:
                 res = adapters.DeliveryResult(channel, "failed", str(e))
             results.append(res)
-            self._record_delivery(tenant_id, payload.get("id"), channel, res)
+            self._record_delivery(tenant_id, payload.get("id"), severity, channel, res)
 
         return [r.to_dict() for r in results]
 
@@ -75,7 +75,7 @@ class NotificationDispatcher:
         finally:
             conn.close()
 
-    def _record_delivery(self, tenant_id: str, alert_id: str | None, channel: str, res) -> None:
+    def _record_delivery(self, tenant_id: str, alert_id: str | None, severity: str, channel: str, res) -> None:
         if not alert_id:
             return
         conn = get_conn()
@@ -84,18 +84,38 @@ class NotificationDispatcher:
                 cur.execute(
                     """
                     INSERT INTO risk.alert_deliveries
-                        (alert_id, tenant_id, channel, status, attempts, last_error)
-                    VALUES (%s, %s, %s, %s, 1, %s)
+                        (alert_id, tenant_id, severity, channel, status, attempts, last_error)
+                    VALUES (%s, %s, %s, %s, %s, 1, %s)
                     ON CONFLICT (alert_id, channel) DO UPDATE SET
+                        severity = EXCLUDED.severity,
                         status = EXCLUDED.status,
                         attempts = risk.alert_deliveries.attempts + 1,
                         last_error = EXCLUDED.last_error,
                         updated_at = now()
                     """,
-                    (alert_id, tenant_id, channel, res.status, res.error),
+                    (alert_id, tenant_id, severity, channel, res.status, res.error),
                 )
             conn.commit()
         except Exception as e:
             logger.warning("record_delivery failed for %s/%s: %s", tenant_id, channel, e)
+        finally:
+            conn.close()
+
+    def has_delivered(self, alert_id: str, severity: str) -> bool:
+        """True si ya se entregó esta Alert con esta severidad (dedup de reenvíos)."""
+        if not alert_id:
+            return False
+        conn = get_conn()
+        try:
+            with conn.cursor() as cur:
+                cur.execute(
+                    "SELECT 1 FROM risk.alert_deliveries "
+                    "WHERE alert_id = %s AND severity = %s AND status = 'sent' LIMIT 1",
+                    (alert_id, severity),
+                )
+                return cur.fetchone() is not None
+        except Exception as e:
+            logger.warning("has_delivered check failed for %s: %s", alert_id, e)
+            return False
         finally:
             conn.close()

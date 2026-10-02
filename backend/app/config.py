@@ -17,6 +17,9 @@ class Settings(BaseSettings):
     debug: bool = False
     log_level: str = "INFO"  # level for this module's own loggers; see app.logging_setup
 
+    # Id del módulo en marketplace_modules / tenant_installed_modules.
+    module_id: str = "risk"
+
     # API
     api_prefix: str = "/api/risk"
     cors_origins: list[str] = []  # Set via CORS_ORIGINS env var; empty = deny all cross-origin

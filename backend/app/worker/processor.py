@@ -10,7 +10,7 @@ from typing import Any, Dict, List
 
 from nkz_platform_sdk import SyncOrionClient
 
-from app.alerts.contract import alert_entity_id, severity_for_score
+from app.alerts.contract import severity_for_score
 from app.config import get_settings
 from app.worker import sources, weather_source
 from app.worker.alert_publisher import publish_alert
@@ -111,24 +111,6 @@ def _prepare_data_sources(tenant_id, risk, entity, orion, conn, settings) -> Dic
     return data
 
 
-def _dispatch_alert(tenant_id: str, alert_type: str, severity: str, entity_id: str) -> None:
-    """Entrega el aviso por los canales configurados (no-fatal)."""
-    from app.dispatcher import NotificationDispatcher
-
-    alert_id = alert_entity_id(tenant_id, alert_type, entity_id)
-    NotificationDispatcher().dispatch(
-        tenant_id,
-        alert_type,
-        severity,
-        {
-            "id": alert_id,
-            "title": f"Risk Alert — {alert_type}",
-            "summary": f"[{severity.upper()}] {alert_type}: {entity_id}",
-            "data": {"screen": "module/risk", "entityId": entity_id, "alertType": alert_type},
-        },
-    )
-
-
 def _evaluate_crop_stress(orion, tenant_id, settings) -> tuple[int, int]:
     """CropHealthAssessment (crop-health) → Alert(category=crop) si severidad alta."""
     evaluated = errors = 0
@@ -158,10 +140,6 @@ def _evaluate_crop_stress(orion, tenant_id, settings) -> tuple[int, int]:
             confidence=1.0,
         ):
             evaluated += 1
-            try:
-                _dispatch_alert(tenant_id, "crop_stress", alert_sev, parcel_id)
-            except Exception as e:
-                logger.warning("crop dispatch failed for %s: %s", parcel_id, e)
         else:
             logger.warning("crop publish failed for %s", parcel_id)
             errors += 1
@@ -222,7 +200,6 @@ def _evaluate_risks(
                     if score < PUBLISH_THRESHOLD:
                         continue
                     severity = result.get("severity") or severity_for_score(score)
-                    sev_str = severity if isinstance(severity, str) else severity.value
                     if publish_alert(
                         orion_ld_url=settings.orion_ld_url,
                         context_url=settings.context_url,
@@ -237,10 +214,6 @@ def _evaluate_risks(
                         confidence=result.get("confidence", 1.0),
                     ):
                         evaluated += 1
-                        try:
-                            _dispatch_alert(tenant_id, risk["alert_type"], sev_str, entity_id)
-                        except Exception as e:
-                            logger.warning("dispatch failed for %s/%s: %s", risk["alert_type"], entity_id, e)
                     else:
                         logger.warning("publish failed for %s/%s", risk["alert_type"], entity_id)
                         errors += 1
