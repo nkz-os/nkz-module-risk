@@ -69,7 +69,6 @@ def build_registrar() -> SubscriptionRegistrar | None:
             f"http://risk-module-api-service:8000{settings.api_prefix}/internal/notify"
         ),
         subscriptions=[
-            {"type": "Alert", "watched_attributes": ["status"], "throttling": ALERT_THROTTLING},
             {
                 "type": "AgriParcel",
                 "watched_attributes": ["hasAgriCrop"],
