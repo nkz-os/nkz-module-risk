@@ -65,6 +65,28 @@ def _resolve_tenant_for_parcel(conn, parcel_id: str) -> str | None:
     return None
 
 
+def _eval_parcel_background(tenant_hint: str | None, parcel_id: str) -> None:
+    """Evalúa una parcela en segundo plano (hilo) con su propia conexión.
+
+    Corre fuera del handler para que /notify responda 204 al momento y no
+    supere el timeout de Orion (que pausa la suscripción tras 3 fallos).
+    """
+    from app.worker.processor import evaluate_risks_for_parcel
+
+    conn = get_conn()
+    try:
+        tenant_id = tenant_hint or _resolve_tenant_for_parcel(conn, parcel_id)
+        if not tenant_id:
+            logger.warning("notify: cannot resolve tenant for %s", parcel_id)
+            return
+        result = evaluate_risks_for_parcel(conn, tenant_id, parcel_id)
+        logger.info("notify: parcel risk eval %s/%s -> %s", tenant_id, parcel_id, result)
+    except Exception as exc:  # noqa: BLE001
+        logger.warning("notify: parcel risk eval failed %s: %s", parcel_id, exc)
+    finally:
+        conn.close()
+
+
 @router.post("/notify", status_code=204)
 async def ngsi_ld_notify(
     request: Request,
@@ -72,8 +94,9 @@ async def ngsi_ld_notify(
 ):
     """Recibe notificaciones NGSI-LD (AgriParcel.hasAgriCrop) y evalúa la parcela.
 
-    Contrato Orion-LD: responder 204 sin body. La evaluación es síncrona (una
-    parcela, ~1s) y se ejecuta en un hilo para no bloquear el event loop.
+    Contrato Orion-LD: responder 204 SIN esperar la evaluación. La evaluación se
+    lanza fire-and-forget en un hilo (con conexión propia) para no bloquear la
+    respuesta ni superar el timeout de Orion.
     """
     try:
         payload = await request.json()
@@ -84,30 +107,13 @@ async def ngsi_ld_notify(
     if not isinstance(data, list):
         raise HTTPException(status_code=400, detail="invalid payload")
 
-    from app.worker.processor import evaluate_risks_for_parcel
-
-    conn = get_conn()
-    try:
-        for entity in data:
-            if not isinstance(entity, dict) or entity.get("type") != "AgriParcel":
-                continue
-            parcel_id = entity.get("id")
-            if not parcel_id:
-                continue
-
-            tenant_id = x_ngsild_tenant or _resolve_tenant_for_parcel(conn, parcel_id)
-            if not tenant_id:
-                logger.warning("notify: cannot resolve tenant for %s", parcel_id)
-                continue
-
-            try:
-                result = await asyncio.to_thread(
-                    evaluate_risks_for_parcel, conn, tenant_id, parcel_id
-                )
-                logger.info("notify: parcel risk eval %s/%s -> %s", tenant_id, parcel_id, result)
-            except Exception as exc:  # noqa: BLE001
-                logger.warning("notify: parcel risk eval failed %s/%s: %s", tenant_id, parcel_id, exc)
-    finally:
-        conn.close()
+    loop = asyncio.get_running_loop()
+    for entity in data:
+        if not isinstance(entity, dict) or entity.get("type") != "AgriParcel":
+            continue
+        parcel_id = entity.get("id")
+        if not parcel_id:
+            continue
+        loop.run_in_executor(None, _eval_parcel_background, x_ngsild_tenant, parcel_id)
 
     return Response(status_code=204)

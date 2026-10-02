@@ -3,6 +3,7 @@ from unittest.mock import MagicMock, patch
 
 from fastapi.testclient import TestClient
 
+from app.api import internal
 from app.main import app
 from app.middleware import verify_internal_secret
 from app.worker import processor
@@ -25,6 +26,18 @@ def test_evaluate_risks_for_parcel_delegates(monkeypatch):
     assert r == {"evaluated": 0, "errors": 0}
 
 
+def test_eval_parcel_background(monkeypatch):
+    conn = MagicMock()
+    monkeypatch.setattr(internal, "get_conn", lambda: conn)
+    eval_mock = MagicMock(return_value={"evaluated": 1, "errors": 0})
+    monkeypatch.setattr("app.worker.processor.evaluate_risks_for_parcel", eval_mock)
+
+    internal._eval_parcel_background("montiko", "urn:ngsi-ld:AgriParcel:p1")
+
+    eval_mock.assert_called_once_with(conn, "montiko", "urn:ngsi-ld:AgriParcel:p1")
+    conn.close.assert_called_once()
+
+
 def test_notify_invalid_payload():
     app.dependency_overrides[verify_internal_secret] = lambda: None
     try:
@@ -35,13 +48,9 @@ def test_notify_invalid_payload():
         app.dependency_overrides.pop(verify_internal_secret, None)
 
 
-def test_notify_processes_parcel():
+def test_notify_returns_204_without_evaluating_sync():
     app.dependency_overrides[verify_internal_secret] = lambda: None
-    conn = MagicMock()
-    with patch("app.api.internal.get_conn", return_value=conn), patch(
-        "app.worker.processor.evaluate_risks_for_parcel",
-        return_value={"evaluated": 1, "errors": 0},
-    ) as eval_mock:
+    with patch("app.api.internal._eval_parcel_background") as bg_mock:
         try:
             with TestClient(app) as c:
                 r = c.post(
@@ -52,8 +61,5 @@ def test_notify_processes_parcel():
                 assert r.status_code == 204
         finally:
             app.dependency_overrides.pop(verify_internal_secret, None)
-
-    assert eval_mock.call_count == 1
-    args = eval_mock.call_args[0]
-    assert args[1] == "montiko"
-    assert args[2] == "urn:ngsi-ld:AgriParcel:p1"
+    # _eval_parcel_background se programa vía run_in_executor (no se espera);
+    # el handler devuelve 204 sin ejecutar la evaluación en línea.
