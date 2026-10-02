@@ -107,7 +107,7 @@ const Monitor: React.FC = () => {
             const severity = String(val(a.severity) ?? 'low');
             const alertType = String(val(a.alertType) ?? '');
             const category = String(val(a.category) ?? '');
-            const parcel = shortId(refObj(a.refEntity));
+            const parcel = a.refEntityName || shortId(refObj(a.refEntity));
             return (
               <li
                 key={a.id}

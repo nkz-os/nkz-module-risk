@@ -12,6 +12,7 @@ export interface AlertItem {
   severity?: { value?: string } | string;
   status?: { value?: string } | string;
   refEntity?: { object?: string } | string;
+  refEntityName?: string;
 }
 
 export interface CatalogItem {
