@@ -87,32 +87,15 @@ def _eval_parcel_background(tenant_hint: str | None, parcel_id: str) -> None:
         conn.close()
 
 
-def _dispatch_alert_background(tenant_hint: str | None, entity: dict) -> None:
-    """Entrega una Alert (de cualquier productor) en segundo plano (hilo)."""
-    from app.dispatcher.alert_router import dispatch_alert_entity
-
-    conn = get_conn()
-    try:
-        tenant_id = tenant_hint or _resolve_tenant_for_parcel(conn, entity.get("id"))
-        if not tenant_id:
-            logger.warning("notify: cannot resolve tenant for alert %s", entity.get("id"))
-            return
-        dispatch_alert_entity(tenant_id, entity)
-    except Exception as exc:  # noqa: BLE001
-        logger.warning("notify: alert dispatch failed %s: %s", entity.get("id"), exc)
-    finally:
-        conn.close()
-
-
 @router.post("/notify", status_code=204)
 async def ngsi_ld_notify(
     request: Request,
     x_ngsild_tenant: str | None = Header(None, alias="NGSILD-Tenant"),
 ):
-    """Recibe notificaciones NGSI-LD y despacha/evalúa en segundo plano.
+    """Recibe notificaciones NGSI-LD y evalúa en segundo plano.
 
-    - Alert -> NotificationDispatcher (único camino de entrega).
-    - AgriParcel -> evaluación de riesgo de esa parcela (asignación de cultivo).
+    AgriParcel -> evaluación de riesgo de esa parcela (asignación de cultivo).
+    La entrega de Alert la hace el módulo notifications (desacoplado 2026-10-02).
 
     Contrato Orion-LD: responder 204 SIN esperar; el trabajo corre en un hilo.
     """
@@ -129,10 +112,7 @@ async def ngsi_ld_notify(
     for entity in data:
         if not isinstance(entity, dict):
             continue
-        etype = entity.get("type")
-        if etype == "Alert":
-            loop.run_in_executor(None, _dispatch_alert_background, x_ngsild_tenant, entity)
-        elif etype == "AgriParcel":
+        if entity.get("type") == "AgriParcel":
             parcel_id = entity.get("id")
             if parcel_id:
                 loop.run_in_executor(None, _eval_parcel_background, x_ngsild_tenant, parcel_id)
