@@ -1,9 +1,9 @@
 /**
- * Configuración de canales y suscripciones de alertas.
+ * Configuración de suscripciones de alertas.
  */
 import React, { useEffect, useState } from 'react';
 import { useTranslation } from 'react-i18next';
-import { useModuleApi, CatalogItem, Subscription, Channels } from '../services/api';
+import { useModuleApi, CatalogItem, Subscription } from '../services/api';
 
 const App: React.FC = () => {
   const { t } = useTranslation('risk');
@@ -11,20 +11,16 @@ const App: React.FC = () => {
 
   const [catalog, setCatalog] = useState<CatalogItem[]>([]);
   const [subs, setSubs] = useState<Map<string, Subscription>>(new Map());
-  const [channels, setChannels] = useState<Channels | null>(null);
   const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
 
   const load = async () => {
     try {
-      const [cat, s, ch] = await Promise.all([
+      const [cat, s] = await Promise.all([
         api.getCatalog(),
         api.getSubscriptions(),
-        api.getChannels(),
       ]);
       setCatalog(cat);
       setSubs(new Map(s.map((x) => [x.alert_type, x])));
-      setChannels(ch);
     } catch {
       /* keep state */
     } finally {
@@ -68,89 +64,20 @@ const App: React.FC = () => {
     }
   };
 
-  const saveChannels = async () => {
-    if (!channels) return;
-    setSaving(true);
-    try {
-      const saved = await api.putChannels(channels);
-      setChannels(saved);
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const setChannel = (channel: keyof Channels, patch: Record<string, unknown>) => {
-    setChannels((prev) => (prev ? { ...prev, [channel]: { ...prev[channel], ...patch } } : prev));
-  };
-
   if (loading) return <p className="p-6 text-nkz-muted">{t('config.loading')}</p>;
 
   return (
     <div className="p-6 space-y-6 max-w-4xl">
-      {/* ── Canales ── */}
-      <section className="rounded-xl border border-nkz-border bg-white p-4 space-y-4">
-        <h2 className="font-semibold text-nkz-text-primary">{t('config.channels')}</h2>
-
-        <ChannelRow
-          label={t('config.email')}
-          enabled={Boolean((channels?.email as any)?.enabled)}
-          onToggle={(v) => setChannel('email', { enabled: v })}
+      {/* ── Notificaciones ── */}
+      <div className="rounded-xl border border-nkz-border bg-nkz-info-soft p-4 text-sm text-nkz-text-primary flex flex-col sm:flex-row sm:items-center justify-between gap-3">
+        <span>{t('config.notifications_moved')}</span>
+        <a
+          href="/notifications"
+          className="text-sm font-medium text-nkz-accent-base hover:underline whitespace-nowrap"
         >
-          <label className="text-xs text-nkz-muted">{t('config.email_to')}</label>
-          <input
-            type="email"
-            value={String((channels?.email as any)?.to ?? '')}
-            onChange={(e) => setChannel('email', { to: e.target.value })}
-            placeholder="you@example.com"
-            className="w-full border border-nkz-border rounded-lg px-3 py-1.5 text-sm"
-          />
-        </ChannelRow>
-
-        <ChannelRow
-          label={t('config.push')}
-          enabled={Boolean((channels?.push as any)?.enabled)}
-          onToggle={(v) => setChannel('push', { enabled: v })}
-        />
-
-        <ChannelRow
-          label={t('config.zulip')}
-          enabled={Boolean((channels?.zulip as any)?.enabled)}
-          onToggle={(v) => setChannel('zulip', { enabled: v })}
-        >
-          <div className="grid grid-cols-2 gap-2">
-            <div>
-              <label className="text-xs text-nkz-muted">{t('config.zulip_stream')}</label>
-              <input
-                value={String((channels?.zulip as any)?.stream ?? 'alerts')}
-                onChange={(e) => setChannel('zulip', { stream: e.target.value })}
-                className="w-full border border-nkz-border rounded-lg px-3 py-1.5 text-sm"
-              />
-            </div>
-            <div>
-              <label className="text-xs text-nkz-muted">{t('config.zulip_topic')}</label>
-              <input
-                value={String((channels?.zulip as any)?.topic ?? 'notifications')}
-                onChange={(e) => setChannel('zulip', { topic: e.target.value })}
-                className="w-full border border-nkz-border rounded-lg px-3 py-1.5 text-sm"
-              />
-            </div>
-          </div>
-        </ChannelRow>
-
-        <ChannelRow
-          label={t('config.telegram')}
-          enabled={Boolean((channels?.telegram as any)?.enabled)}
-          onToggle={(v) => setChannel('telegram', { enabled: v })}
-        />
-
-        <button
-          onClick={saveChannels}
-          disabled={saving}
-          className="px-4 py-2 rounded-lg bg-nkz-accent-base text-white text-sm font-medium disabled:opacity-50"
-        >
-          {saving ? t('config.saving') : t('config.save')}
-        </button>
-      </section>
+          {t('config.go_to_notifications')} &rarr;
+        </a>
+      </div>
 
       {/* ── Suscripciones ── */}
       <section className="rounded-xl border border-nkz-border bg-white p-4 space-y-2">
@@ -204,24 +131,5 @@ const App: React.FC = () => {
   );
 };
 
-const ChannelRow: React.FC<{
-  label: string;
-  enabled: boolean;
-  onToggle: (v: boolean) => void;
-  children?: React.ReactNode;
-}> = ({ label, enabled, onToggle, children }) => (
-  <div className="border-b border-nkz-border/50 pb-3 last:border-0">
-    <div className="flex items-center justify-between mb-1">
-      <span className="text-sm font-medium text-nkz-text-primary">{label}</span>
-      <button
-        onClick={() => onToggle(!enabled)}
-        className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors ${enabled ? 'bg-nkz-success' : 'bg-nkz-bg-secondary'}`}
-      >
-        <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${enabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
-      </button>
-    </div>
-    {enabled && children}
-  </div>
-);
-
 export default App;
+

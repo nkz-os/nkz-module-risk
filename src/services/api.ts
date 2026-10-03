@@ -36,14 +36,6 @@ export interface Subscription {
   entity_filters?: Record<string, unknown>;
 }
 
-export interface Channels {
-  email: Record<string, unknown>;
-  push: Record<string, unknown>;
-  zulip: Record<string, unknown>;
-  webhook: Record<string, unknown>;
-  telegram: Record<string, unknown>;
-}
-
 export interface Webhook {
   id: string;
   name: string;
@@ -88,8 +80,6 @@ export function useModuleApi() {
     getSubscriptions: () => client.get<Subscription[]>('/subscriptions'),
     createSubscription: (d: Partial<Subscription>) => client.post<Subscription>('/subscriptions', d),
     updateSubscription: (id: number, d: Partial<Subscription>) => client.patch<Subscription>(`/subscriptions/${id}`, d),
-    getChannels: () => client.get<Channels>('/channels'),
-    putChannels: (d: Partial<Channels>) => client.put<Channels>('/channels', d),
     getWebhooks: () => client.get<Webhook[]>('/webhooks'),
     createWebhook: (d: { name: string; url: string; secret?: string; min_severity: string }) => client.post<Webhook>('/webhooks', d),
     deleteWebhook: (id: string) => client.delete<void>(`/webhooks/${id}`),
