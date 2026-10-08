@@ -27,6 +27,9 @@ _TTL_DEFAULT = 24
 
 _PAGE = 500
 
+# Historial de Alert cerradas que se conserva en Orion (evita inflarlo).
+PURGE_AFTER_DAYS = 90
+
 
 def decide(prev_status: Optional[str], score: float, threshold: float) -> str:
     """Qué hacer con la Alert de (riesgo, parcela) tras una evaluación."""
@@ -77,6 +80,10 @@ def load_existing(orion) -> Dict[str, Dict[str, Any]]:
                 "category": _value(e.get("category")),
                 "alert_type": _value(e.get("alertType")),
                 "observed_at": _value(e.get("observedAt")),
+                "state_at": next(
+                    (_value(e.get(k)) for k in ("resolvedAt", "expiredAt", "dismissedAt") if e.get(k)),
+                    None,
+                ),
             }
         if len(page) < _PAGE:
             return out
@@ -112,3 +119,25 @@ def sweep_expired(
             mark(orion, alert_id, "expired", now)
             expired += 1
     return expired
+
+
+def purge_closed(
+    orion,
+    existing: Dict[str, Dict[str, Any]],
+    touched: Set[str],
+    now: datetime,
+    max_age_days: int = PURGE_AFTER_DAYS,
+) -> int:
+    """Borra las Alert cerradas hace más de `max_age_days`.
+
+    No toca las `active` ni las `dismissed` que esta ejecución ha visto aún en
+    condición: borrarlas haría que el worker las volviera a publicar.
+    """
+    purged = 0
+    for alert_id, info in existing.items():
+        if info["status"] == "active" or alert_id in touched:
+            continue
+        if is_expired(info.get("state_at"), max_age_days * 24, now):
+            orion.delete_entity(alert_id)
+            purged += 1
+    return purged

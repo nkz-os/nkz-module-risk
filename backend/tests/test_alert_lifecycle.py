@@ -114,3 +114,30 @@ def test_processor_publishes_new_alert():
     touched = set()
     assert _apply_lifecycle(MagicMock(), "t1", "frost", "urn:ngsi-ld:AgriParcel:p1", 90.0, {}, touched, NOW)
     assert "urn:ngsi-ld:Alert:t1:frost:p1" in touched
+
+
+def test_load_existing_keeps_state_timestamp():
+    orion = MagicMock()
+    a = _alert("a1", "resolved")
+    a["resolvedAt"] = {"type": "Property", "value": "2026-06-01T00:00:00Z"}
+    orion.query_entities.side_effect = [[a], []]
+    assert lc.load_existing(orion)["a1"]["state_at"] == "2026-06-01T00:00:00Z"
+
+
+def test_purge_deletes_only_old_closed_alerts():
+    old = (NOW - timedelta(days=91)).isoformat().replace("+00:00", "Z")
+    recent = (NOW - timedelta(days=10)).isoformat().replace("+00:00", "Z")
+    existing = {
+        "old_resolved": {"status": "resolved", "state_at": old, "observed_at": old},
+        "old_dismissed": {"status": "dismissed", "state_at": old, "observed_at": old},
+        "recent_expired": {"status": "expired", "state_at": recent, "observed_at": old},
+        "old_active": {"status": "active", "state_at": None, "observed_at": old},
+        "no_dates": {"status": "resolved", "state_at": None, "observed_at": None},
+    }
+    existing["old_dismissed_still_on"] = {"status": "dismissed", "state_at": old, "observed_at": old}
+    orion = MagicMock()
+    n = lc.purge_closed(orion, existing, touched={"old_dismissed_still_on"}, now=NOW, max_age_days=90)
+    deleted = {c[0][0] for c in orion.delete_entity.call_args_list}
+    # Una descartada cuya condición sigue no se borra: el worker la reabriría.
+    assert deleted == {"old_resolved", "old_dismissed"}
+    assert n == 2

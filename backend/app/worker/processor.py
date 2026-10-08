@@ -277,6 +277,9 @@ def _evaluate_risks(
                 )
                 if n:
                     logger.info("tenant=%s expired_alerts=%d", tenant_id, n)
+                purged = lifecycle.purge_closed(orion, existing, touched, now)
+                if purged:
+                    logger.info("tenant=%s purged_alerts=%d", tenant_id, purged)
             except Exception as e:
                 logger.error("Alert lifecycle sweep failed for %s: %s", tenant_id, e)
                 errors += 1
