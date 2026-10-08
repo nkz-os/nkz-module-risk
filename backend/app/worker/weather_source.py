@@ -22,7 +22,8 @@ Two rules this module does not bend:
 """
 
 import logging
-from typing import Any, Dict, Optional
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, List, Optional, Tuple
 
 import requests
 
@@ -233,49 +234,84 @@ def fetch_parcel_weather(
     return flat
 
 
+# A season total is only meaningful if the series covers the season. The feed
+# can start mid-season (it did, in June) or drop days; summing what is there
+# would understate the total by an unknown amount and still look like a number.
+SEASON_START_TOLERANCE_DAYS = 3
+SEASON_MIN_COVERAGE = 0.9
+
+
+def aggregate_season_gdd(
+    daily_values: List[Tuple[date, float]],
+    season_start: date,
+    today: date,
+) -> Optional[Dict[str, Any]]:
+    """Sum one GDD value per day, or None if the series does not cover the season."""
+    if not daily_values:
+        return None
+    first_day = min(d for d, _ in daily_values)
+    if (first_day - season_start).days > SEASON_START_TOLERANCE_DAYS:
+        logger.warning(
+            "GDD series starts %s, season starts %s: no season total", first_day, season_start
+        )
+        return None
+    elapsed = (today - season_start).days + 1
+    coverage = len(daily_values) / elapsed if elapsed > 0 else 0.0
+    if coverage < SEASON_MIN_COVERAGE:
+        logger.warning(
+            "GDD series covers %d of %d season days: no season total", len(daily_values), elapsed
+        )
+        return None
+    return {
+        "gdd_season_total": round(sum(v for _, v in daily_values), 1),
+        "days_accumulated": len(daily_values),
+    }
+
+
 def fetch_season_gdd(
     connection,
     tenant_id: str,
     season_start_doy: int = 1,
     parcel_id: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
-    """Season-to-date GDD, summed from the timeseries the broker feeds.
+    """Season-to-date GDD for one parcel, from the timeseries the broker feeds.
 
-    The daily increment arrives in `telemetry_measurements` through the
-    WeatherObserved subscription, under its compacted NGSI-LD attribute name.
+    `gddAccumulated` is the GDD estimate for the current day, re-published every
+    ~2h as forecast hours become observed. Only the last value of each day
+    counts; summing every row counts each day a dozen times.
     """
+    if not parcel_id:
+        return None
+    today = datetime.now(timezone.utc).date()
+    season_start = date(today.year, 1, 1) + timedelta(days=season_start_doy - 1)
+
     query = """
-        SELECT COALESCE(SUM(value), 0) AS gdd_season_total,
-               COUNT(*)                AS days_accumulated
+        SELECT DISTINCT ON (observed_at::date)
+               observed_at::date AS day, value
         FROM telemetry_measurements
         WHERE tenant_id = %s
+          AND entity_id = %s
           AND attribute_name = 'gddAccumulated'
-          AND observed_at >= make_date(
-                EXTRACT(year FROM CURRENT_DATE)::int, 1, 1
-              ) + INTERVAL '1 day' * (%s - 1)
+          AND observed_at >= %s
+        ORDER BY observed_at::date, observed_at DESC
     """
-    params: list = [tenant_id, season_start_doy]
-    if parcel_id:
-        query += " AND entity_id = %s"
-        params.append(weather_observed_id(tenant_id, parcel_id))
+    params = [tenant_id, weather_observed_id(tenant_id, parcel_id), season_start]
 
     try:
         cursor = connection.cursor()
         cursor.execute(query, params)
-        row = cursor.fetchone()
+        rows = cursor.fetchall()
         cursor.close()
     except Exception as exc:
         logger.error("Failed to read season GDD for %s: %s", tenant_id, exc)
         return None
 
-    if not row:
-        return None
-    days = int(row["days_accumulated"] if isinstance(row, dict) else row[1])
-    if days <= 0:
-        return None
-    total = float(row["gdd_season_total"] if isinstance(row, dict) else row[0])
-    return {
-        "gdd_season_total": total,
-        "season_start_doy": season_start_doy,
-        "days_accumulated": days,
-    }
+    daily = [
+        (r["day"], float(r["value"])) if isinstance(r, dict) else (r[0], float(r[1]))
+        for r in rows
+        if (r["value"] if isinstance(r, dict) else r[1]) is not None
+    ]
+    result = aggregate_season_gdd(daily, season_start, today)
+    if result is not None:
+        result["season_start_doy"] = season_start_doy
+    return result
