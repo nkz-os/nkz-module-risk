@@ -12,7 +12,11 @@
     "title": "Avisos de Riesgo",
     "loading": "Cargando…",
     "empty": "Sin avisos activos.",
-    "tab": "Monitor"
+    "tab": "Monitor",
+    "dismiss": "Descartar",
+    "dismissing": "Descartando…",
+    "dismissHint": "Cerrar este aviso. No volverá mientras la condición siga activa.",
+    "dismissError": "No se pudo descartar el aviso."
   },
   "title": {
     "es": "Avisos de Riesgo",

@@ -3,7 +3,11 @@
     "title": "Risk Alerts",
     "loading": "Loading…",
     "empty": "No active alerts.",
-    "tab": "Monitor"
+    "tab": "Monitor",
+    "dismiss": "Ignorer",
+    "dismissing": "En cours…",
+    "dismissHint": "Fermer cette alerte. Elle ne reviendra pas tant que la condition persiste.",
+    "dismissError": "Impossible d'ignorer l'alerte."
   },
   "title": {
     "es": "Avisos de Riesgo",

@@ -3,7 +3,11 @@
     "title": "Risk Alerts",
     "loading": "Loading…",
     "empty": "No active alerts.",
-    "tab": "Monitor"
+    "tab": "Monitor",
+    "dismiss": "Baztertu",
+    "dismissing": "Baztertzen…",
+    "dismissHint": "Itxi abisu hau. Ez da itzuliko baldintzak aktibo jarraitzen duen bitartean.",
+    "dismissError": "Ezin izan da abisua baztertu."
   },
   "title": {
     "es": "Avisos de Riesgo",

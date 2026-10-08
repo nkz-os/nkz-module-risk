@@ -1,11 +1,12 @@
 """Lectura de Alert activos desde Orion-LD (bus canónico, no Postgres)."""
+from datetime import datetime, timezone
 from typing import Optional
 
-from fastapi import APIRouter, Depends, Query
+from fastapi import APIRouter, Depends, HTTPException, Query
 from nkz_platform_sdk import SyncOrionClient
 
 from app.config import get_settings
-from app.middleware import get_tenant_id
+from app.middleware import AuthContext, get_current_user, get_tenant_id
 
 router = APIRouter()
 
@@ -70,3 +71,34 @@ def get_alerts(
     for e in entities:
         e["refEntityName"] = parcel_names.get(_unwrap_ref(e), "")
     return {"alerts": entities, "count": len(entities)}
+
+
+def _norm_tenant(t: str) -> str:
+    return t.strip().lower().replace("-", "_")
+
+
+def dismiss(client, tenant_id: str, alert_id: str, user_id: str, now: datetime) -> dict:
+    """Marca la Alert como `dismissed`. Siempre permitido para el usuario.
+
+    El worker no la reabre mientras la condición siga; cuando termine pasa a
+    `resolved` y una nueva aparición es un aviso nuevo.
+    """
+    parts = alert_id.split(":")
+    # urn:ngsi-ld:Alert:{tenant}:{alert_type}:{entity}
+    if len(parts) < 6 or parts[2] != "Alert" or _norm_tenant(parts[3]) != _norm_tenant(tenant_id):
+        raise HTTPException(status_code=404, detail="Alert not found")
+    if not client.get_entity(alert_id):
+        raise HTTPException(status_code=404, detail="Alert not found")
+    client.append_entity_attrs(alert_id, {
+        "status": {"type": "Property", "value": "dismissed"},
+        "dismissedAt": {"type": "Property", "value": now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")},
+        "dismissedBy": {"type": "Property", "value": user_id},
+    })
+    return {"id": alert_id, "status": "dismissed"}
+
+
+@router.post("/alerts/{alert_id}/dismiss")
+def dismiss_alert(alert_id: str, auth: AuthContext = Depends(get_current_user)):
+    s = get_settings()
+    with SyncOrionClient(auth.tenant_id, base_url=s.orion_ld_url, context_url=s.context_url) as client:
+        return dismiss(client, auth.tenant_id, alert_id, auth.user_id or "", datetime.now(timezone.utc))

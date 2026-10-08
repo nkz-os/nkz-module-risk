@@ -54,6 +54,21 @@ const Monitor: React.FC = () => {
   const [alerts, setAlerts] = useState<AlertItem[]>([]);
   const [catalog, setCatalog] = useState<Map<string, CatalogItem>>(new Map());
   const [loading, setLoading] = useState(true);
+  const [dismissing, setDismissing] = useState<string | null>(null);
+  const [dismissError, setDismissError] = useState(false);
+
+  const dismiss = async (id: string) => {
+    setDismissing(id);
+    setDismissError(false);
+    try {
+      await api.dismissAlert(id);
+      setAlerts((prev) => prev.filter((x) => x.id !== id));
+    } catch {
+      setDismissError(true);
+    } finally {
+      setDismissing(null);
+    }
+  };
 
   useEffect(() => {
     (async () => {
@@ -96,6 +111,8 @@ const Monitor: React.FC = () => {
         ))}
       </div>
 
+      {dismissError && <p className="text-sm text-nkz-danger-strong">{t('monitor.dismissError')}</p>}
+
       {alerts.length === 0 ? (
         <div className="rounded-xl border border-nkz-border bg-nkz-surface-raised p-8 text-center">
           <ShieldAlert className="w-8 h-8 mx-auto text-nkz-text-muted mb-2" />
@@ -122,6 +139,14 @@ const Monitor: React.FC = () => {
                     {parcel ? ` · ${parcel}` : ''}
                   </p>
                 </div>
+                <button
+                  onClick={() => dismiss(a.id)}
+                  disabled={dismissing === a.id}
+                  title={t('monitor.dismissHint')}
+                  className="text-xs text-nkz-text-muted hover:underline disabled:opacity-50"
+                >
+                  {dismissing === a.id ? t('monitor.dismissing') : t('monitor.dismiss')}
+                </button>
               </li>
             );
           })}

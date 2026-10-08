@@ -3,7 +3,11 @@
     "title": "Risk Alerts",
     "loading": "Loading…",
     "empty": "No active alerts.",
-    "tab": "Monitor"
+    "tab": "Monitor",
+    "dismiss": "Descarta",
+    "dismissing": "Descartant…",
+    "dismissHint": "Tanca aquest avís. No tornarà mentre la condició continuï activa.",
+    "dismissError": "No s'ha pogut descartar l'avís."
   },
   "title": {
     "es": "Avisos de Riesgo",

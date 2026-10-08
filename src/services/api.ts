@@ -76,6 +76,8 @@ export function useModuleApi() {
 
   return {
     getAlerts: () => client.get<{ alerts: AlertItem[]; count: number }>('/alerts'),
+    dismissAlert: (id: string) =>
+      client.post<{ id: string; status: string }>(`/alerts/${encodeURIComponent(id)}/dismiss`, {}),
     getCatalog: () => client.get<CatalogItem[]>('/catalog'),
     getSubscriptions: () => client.get<Subscription[]>('/subscriptions'),
     createSubscription: (d: Partial<Subscription>) => client.post<Subscription>('/subscriptions', d),

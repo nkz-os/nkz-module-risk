@@ -12,7 +12,11 @@
     "title": "Risk Alerts",
     "loading": "Loading…",
     "empty": "No active alerts.",
-    "tab": "Monitor"
+    "tab": "Monitor",
+    "dismiss": "Dismiss",
+    "dismissing": "Dismissing…",
+    "dismissHint": "Close this alert. It will not come back while the condition persists.",
+    "dismissError": "Could not dismiss the alert."
   },
   "title": {
     "es": "Avisos de Riesgo",
