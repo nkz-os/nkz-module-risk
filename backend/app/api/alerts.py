@@ -35,25 +35,33 @@ def _unwrap_ref(entity: dict) -> str:
     return str(ref or "")
 
 
-@router.get("/alerts")
-def get_alerts(
-    tenant_id: str = Depends(get_tenant_id),
-    category: Optional[str] = Query(None),
-    severity: Optional[str] = Query(None),
-    limit: int = Query(200, ge=1, le=1000),
-):
-    """Avisos Alert activos del tenant, filtrables por category/severity.
-
-    Añade `refEntityName` (el nombre de la parcela referenciada) para que el
-    frontend no muestre el UUID crudo.
-    """
-    s = get_settings()
+def _build_query(category: Optional[str], severity: Optional[str], status: str) -> Optional[str]:
+    """Filtro NGSI-LD; por defecto solo las `active` (`status=all` = historial)."""
     q_parts = []
     if category:
         q_parts.append(f'category=="{category}"')
     if severity:
         q_parts.append(f'severity=="{severity}"')
-    q = ";".join(q_parts) or None
+    if status != "all":
+        q_parts.append(f'status=="{status}"')
+    return ";".join(q_parts) or None
+
+
+@router.get("/alerts")
+def get_alerts(
+    tenant_id: str = Depends(get_tenant_id),
+    category: Optional[str] = Query(None),
+    severity: Optional[str] = Query(None),
+    status: str = Query("active", pattern="^(active|resolved|expired|dismissed|all)$"),
+    limit: int = Query(200, ge=1, le=1000),
+):
+    """Avisos Alert del tenant (por defecto `active`), filtrables por category/severity/status.
+
+    Añade `refEntityName` (el nombre de la parcela referenciada) para que el
+    frontend no muestre el UUID crudo.
+    """
+    s = get_settings()
+    q = _build_query(category, severity, status)
 
     with SyncOrionClient(tenant_id, base_url=s.orion_ld_url, context_url=s.context_url) as client:
         entities = client.query_entities(type="Alert", q=q, limit=limit)
