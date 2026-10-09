@@ -10,6 +10,7 @@ from typing import Any, Dict, List, Optional
 import requests
 
 from app.worker import weather_source
+from app.worker.crop_cycles import accumulation_start
 
 logger = logging.getLogger(__name__)
 
@@ -36,8 +37,14 @@ def fetch_parcel_weather(orion_ld_url: str, tenant_id: str, parcel_id: str):
     return weather_source.fetch_parcel_weather(orion_ld_url, tenant_id, parcel_id)
 
 
-def fetch_season_gdd(conn, tenant_id: str, parcel_id: str, season_start_doy: int = 1):
-    return weather_source.fetch_season_gdd(conn, tenant_id, season_start_doy, parcel_id)
+def fetch_season_gdd(conn, tenant_id: str, parcel_id: str, season_start_doy: int = 1,
+                     season_start: str | None = None):
+    # season_start="crop_cycle" anchors the season to the parcel's crop cycle
+    # (platform resolution); unreachable platform -> the day-of-year default.
+    override = accumulation_start(tenant_id, parcel_id) if season_start == "crop_cycle" else None
+    return weather_source.fetch_season_gdd(
+        conn, tenant_id, season_start_doy, parcel_id, season_start_override=override,
+    )
 
 
 # ── Soil (nkz-module-soil) ─────────────────────────────────────────────
@@ -308,6 +315,7 @@ SOURCE_FETCHERS = {
     "gdd": lambda ctx, pid, risk: fetch_season_gdd(
         ctx["conn"], ctx["tenant_id"], pid,
         (risk.get("model_config") or {}).get("season_start_doy", 1),
+        (risk.get("model_config") or {}).get("season_start"),
     ),
     "soil": lambda ctx, pid, risk: fetch_parcel_soil(ctx["orion"], pid),
     "ndvi": lambda ctx, pid, risk: fetch_parcel_ndvi(ctx["orion"], pid),

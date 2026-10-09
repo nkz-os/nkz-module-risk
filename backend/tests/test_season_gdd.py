@@ -85,3 +85,102 @@ def test_fetch_takes_last_value_per_day_scoped_to_parcel():
 def test_fetch_without_parcel_returns_none():
     # Without a parcel the series would mix every parcel of the tenant.
     assert weather_source.fetch_season_gdd(_Conn([]), "t1", 1, None) is None
+
+
+# ── Opt-in crop-cycle season start ───────────────────────────────────────
+
+
+class _CaptureCur:
+    def __init__(self, sink):
+        self.sink = sink
+
+    def execute(self, query, params):
+        self.sink["params"] = params
+
+    def fetchall(self):
+        return []
+
+    def close(self):
+        pass
+
+
+class _CaptureConn:
+    def __init__(self):
+        self.sink = {}
+
+    def cursor(self, *a, **k):
+        return _CaptureCur(self.sink)
+
+
+def test_override_replaces_doy_season_start():
+    conn = _CaptureConn()
+    weather_source.fetch_season_gdd(conn, "t", 1, "p1", season_start_override=date(2026, 3, 12))
+    assert conn.sink["params"][2] == date(2026, 3, 12)
+
+
+def test_doy_still_drives_the_default():
+    conn = _CaptureConn()
+    weather_source.fetch_season_gdd(conn, "t", 60, "p1")
+    today = datetime.now(timezone.utc).date()
+    assert conn.sink["params"][2] == date(today.year, 3, 1) if today.year % 4 else date(today.year, 2, 29)
+
+
+def test_crop_cycle_opt_in_passes_platform_start(monkeypatch):
+    from app.worker import sources
+
+    monkeypatch.setattr(sources, "accumulation_start", lambda tenant, parcel: date(2026, 3, 12))
+    seen = {}
+
+    def fake(conn, tenant, doy, pid, season_start_override=None):
+        seen["override"] = season_start_override
+        return {}
+
+    monkeypatch.setattr(sources.weather_source, "fetch_season_gdd", fake)
+    ctx = {"conn": None, "tenant_id": "t"}
+    sources.SOURCE_FETCHERS["gdd"](ctx, "p1", {"model_config": {"season_start": "crop_cycle"}})
+    assert seen["override"] == date(2026, 3, 12)
+
+
+def test_without_opt_in_platform_is_not_called(monkeypatch):
+    from app.worker import sources
+
+    def boom(*a):
+        raise AssertionError("platform must not be called without opt-in")
+
+    monkeypatch.setattr(sources, "accumulation_start", boom)
+    seen = {}
+    monkeypatch.setattr(sources.weather_source, "fetch_season_gdd",
+                        lambda conn, tenant, doy, pid, season_start_override=None: seen.setdefault("o", season_start_override))
+    sources.SOURCE_FETCHERS["gdd"]({"conn": None, "tenant_id": "t"}, "p1", {"model_config": {}})
+    assert seen["o"] is None
+
+
+def test_platform_unreachable_falls_back_to_doy(monkeypatch):
+    from app.worker import crop_cycles
+
+    def down(*a, **k):
+        raise crop_cycles.requests.ConnectionError("down")
+
+    monkeypatch.setattr(crop_cycles.requests, "get", down)
+    assert crop_cycles.accumulation_start("t", "p1") is None
+
+
+def test_platform_start_is_read_with_the_internal_secret(monkeypatch):
+    from app.worker import crop_cycles
+
+    seen = {}
+
+    class _Resp:
+        status_code = 200
+
+        def json(self):
+            return {"accumulation": {"start": "2026-03-12", "basis": "cycle_start"}}
+
+    def fake_get(url, params=None, headers=None, timeout=None):
+        seen.update(url=url, params=params, headers=headers)
+        return _Resp()
+
+    monkeypatch.setattr(crop_cycles.requests, "get", fake_get)
+    assert crop_cycles.accumulation_start("t", "p1") == date(2026, 3, 12)
+    assert seen["url"].endswith("/api/internal/parcels/urn:ngsi-ld:AgriParcel:p1/crop-cycles")
+    assert seen["params"] == {"tenant_id": "t"} and "X-Internal-Service-Secret" in seen["headers"]

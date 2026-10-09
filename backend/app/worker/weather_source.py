@@ -273,6 +273,7 @@ def fetch_season_gdd(
     tenant_id: str,
     season_start_doy: int = 1,
     parcel_id: Optional[str] = None,
+    season_start_override: Optional[date] = None,
 ) -> Optional[Dict[str, Any]]:
     """Season-to-date GDD for one parcel, from the timeseries the broker feeds.
 
@@ -283,7 +284,11 @@ def fetch_season_gdd(
     if not parcel_id:
         return None
     today = datetime.now(timezone.utc).date()
-    season_start = date(today.year, 1, 1) + timedelta(days=season_start_doy - 1)
+    # A pest model's biofix (day of year) unless the caller anchors the season
+    # to the parcel's crop cycle.
+    season_start = season_start_override or (
+        date(today.year, 1, 1) + timedelta(days=season_start_doy - 1)
+    )
 
     query = """
         SELECT DISTINCT ON (observed_at::date)
@@ -314,4 +319,6 @@ def fetch_season_gdd(
     result = aggregate_season_gdd(daily, season_start, today)
     if result is not None:
         result["season_start_doy"] = season_start_doy
+        if season_start_override:
+            result["season_start"] = season_start_override.isoformat()
     return result
