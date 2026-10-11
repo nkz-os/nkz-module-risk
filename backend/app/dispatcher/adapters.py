@@ -31,10 +31,11 @@ def _webhook_signature(secret: str, body: str) -> dict:
     return {"X-Nekazari-Signature": f"sha256={sig}"}
 
 
-def email_adapter(alert: dict, config: dict, email_service_url: str) -> DeliveryResult:
+def email_adapter(alert: dict, config: dict, email_service_url: str, internal_secret: str = "") -> DeliveryResult:
     to = config.get("to") or config.get("recipient")
     if not config.get("enabled") or not to:
         return DeliveryResult("email", "skipped")
+    headers = {"X-Internal-Service-Secret": internal_secret} if internal_secret else {}
     try:
         r = requests.post(
             f"{email_service_url}/send/notification",
@@ -44,6 +45,7 @@ def email_adapter(alert: dict, config: dict, email_service_url: str) -> Delivery
                 "notification_type": "risk_alert",
                 "message": alert.get("summary", ""),
             },
+            headers=headers,
             timeout=10,
         )
         if r.status_code == 200:
