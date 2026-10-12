@@ -4,14 +4,15 @@ Risk Backend - Internal Routes
 Called by entity-manager and other in-cluster services — NEVER by the
 browser, so these routes bypass api-gateway and carry no X-Tenant-ID /
 X-User-ID headers. They authenticate via X-Internal-Service-Secret instead
-(see app.middleware.verify_internal_secret).
+(see app.middleware.verify_internal_secret); /internal/notify accepts the
+derived notification token too (app.middleware.verify_notify_auth).
 
 `/internal/notify` is the NGSI-LD subscription receiver: Orion-LD notifies
 it when `AgriParcel.hasAgriCrop` changes (crop assignment), so the module
 evaluates that parcel's risks immediately instead of waiting for the hourly
 batch. The subscription is created by SubscriptionRegistrar at startup with
-`notification_headers={"X-Internal-Service-Secret": ...}`, which Orion sends
-back on each notification.
+the registrar's receiver auth header (a derived per-tenant token, or the
+master secret), which Orion sends back on each notification.
 """
 
 from __future__ import annotations
@@ -22,14 +23,14 @@ import logging
 from fastapi import APIRouter, Depends, Header, HTTPException, Request, Response
 
 from app.db import get_conn
-from app.middleware import verify_internal_secret
+from app.middleware import verify_internal_secret, verify_notify_auth
 
 logger = logging.getLogger(__name__)
 
-router = APIRouter(prefix="/internal", tags=["internal"], dependencies=[Depends(verify_internal_secret)])
+router = APIRouter(prefix="/internal", tags=["internal"])
 
 
-@router.post("/ping")
+@router.post("/ping", dependencies=[Depends(verify_internal_secret)])
 async def ping() -> dict:
     """Minimal example of an internal-secret-authenticated route."""
     return {"status": "ok"}
@@ -87,7 +88,7 @@ def _eval_parcel_background(tenant_hint: str | None, parcel_id: str) -> None:
         conn.close()
 
 
-@router.post("/notify", status_code=204)
+@router.post("/notify", status_code=204, dependencies=[Depends(verify_notify_auth)])
 async def ngsi_ld_notify(
     request: Request,
     x_ngsild_tenant: str | None = Header(None, alias="NGSILD-Tenant"),

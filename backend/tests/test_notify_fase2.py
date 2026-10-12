@@ -5,7 +5,7 @@ from fastapi.testclient import TestClient
 
 from app.api import internal
 from app.main import app
-from app.middleware import verify_internal_secret
+from app.middleware import verify_notify_auth
 from app.worker import processor
 
 
@@ -39,17 +39,17 @@ def test_eval_parcel_background(monkeypatch):
 
 
 def test_notify_invalid_payload():
-    app.dependency_overrides[verify_internal_secret] = lambda: None
+    app.dependency_overrides[verify_notify_auth] = lambda: None
     try:
         with TestClient(app) as c:
             r = c.post("/api/risk/internal/notify", json={"data": "not-a-list"})
             assert r.status_code == 400
     finally:
-        app.dependency_overrides.pop(verify_internal_secret, None)
+        app.dependency_overrides.pop(verify_notify_auth, None)
 
 
 def test_notify_returns_204_without_evaluating_sync():
-    app.dependency_overrides[verify_internal_secret] = lambda: None
+    app.dependency_overrides[verify_notify_auth] = lambda: None
     with patch("app.api.internal._eval_parcel_background") as bg_mock:
         try:
             with TestClient(app) as c:
@@ -60,7 +60,7 @@ def test_notify_returns_204_without_evaluating_sync():
                 )
                 assert r.status_code == 204
         finally:
-            app.dependency_overrides.pop(verify_internal_secret, None)
+            app.dependency_overrides.pop(verify_notify_auth, None)
     # _eval_parcel_background se programa vía run_in_executor (no se espera);
     # el handler devuelve 204 sin ejecutar la evaluación en línea.
     # (La entrega de Alert la hace el módulo notifications, no risk.)

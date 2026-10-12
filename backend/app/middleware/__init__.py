@@ -27,8 +27,9 @@ from __future__ import annotations
 import hmac
 from typing import Optional
 
-from fastapi import Depends, Header, HTTPException, status
+from fastapi import Depends, Header, HTTPException, Request, status
 from nkz_platform_sdk.auth import AuthContext, require_auth as _sdk_require_auth
+from nkz_platform_sdk.notify_auth import accept_master_from_env, verify_notification
 
 from app.config import Settings, get_settings
 
@@ -40,6 +41,7 @@ __all__ = [
     "get_tenant_id",
     "require_roles",
     "verify_internal_secret",
+    "verify_notify_auth",
 ]
 
 # Backward-compat alias for route code written against the old TokenPayload name.
@@ -126,4 +128,24 @@ async def verify_internal_secret(
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
             detail="Invalid or missing internal service secret",
+        )
+
+
+async def verify_notify_auth(
+    request: Request,
+    settings: Settings = Depends(get_settings),
+) -> None:
+    """Authenticate Orion-LD notifications on /internal/notify.
+
+    Accepts the token bound to this tenant and host (nkz_platform_sdk.notify_auth)
+    and, until NKZ_NOTIFY_ACCEPT_MASTER is false, the master secret itself.
+    """
+    if not verify_notification(
+        request.headers,
+        secret=settings.internal_service_secret or "",
+        accept_master=accept_master_from_env(),
+    ):
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing notification credentials",
         )
