@@ -47,7 +47,7 @@ class Settings(BaseSettings):
     push_service_url: str = "http://push-notification-service:5000"
     zulip_service_url: str = "http://zulip-module-service:5000"
     weather_api_url: str = "http://weather-api-service:8000"
-    # Crop-cycle resolution (entity-manager internal route), opt-in per GDD model.
+    # Platform internal API (crop cycles now come from the SDK over the broker).
     entity_manager_url: str = "http://entity-manager-service:5000"
 
     # Redis (for caching/celery - optional)

@@ -15,8 +15,10 @@ logger = logging.getLogger(__name__)
 
 
 def _run(coro):
-    """Run a coroutine from sync code, also when called inside a running loop
-    (the internal evaluate route is async and calls the worker synchronously)."""
+    """Run a coroutine from sync code. The worker and the evaluate route (through
+    run_in_executor) call this outside any event loop; if a caller ever does so
+    inside a running loop, the coroutine runs in a helper thread instead of
+    failing, blocking that caller until it finishes."""
     try:
         asyncio.get_running_loop()
     except RuntimeError:

@@ -180,7 +180,7 @@ def test_platform_start_comes_from_the_sdk_timeline(monkeypatch):
 
 
 def test_platform_start_works_inside_a_running_event_loop(monkeypatch):
-    """The internal evaluate route is async: the sync reader must not call asyncio.run on its loop."""
+    """Defensive: a caller inside a running loop must not crash on asyncio.run."""
     import asyncio
 
     from app.worker import crop_cycles
