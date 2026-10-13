@@ -14,6 +14,7 @@ from app.config import get_settings
 from app.logging_setup import configure_logging
 from app.api import router as api_router
 from app.api.internal import router as internal_router
+from nkz_platform_sdk.lifecycle import lifecycle_hint_router
 
 logger = logging.getLogger(__name__)
 
@@ -38,6 +39,12 @@ async def lifespan(app: FastAPI):
     except asyncio.CancelledError:
         pass
     logger.info("%s shutting down", settings.app_name)
+
+
+async def _hint_reconcile() -> None:
+    from app.services.subscriptions import reconcile_once
+
+    await reconcile_once()
 
 
 def create_app() -> FastAPI:
@@ -80,6 +87,12 @@ def create_app() -> FastAPI:
     # Internal routes (entity-manager, other in-cluster callers) — authenticated
     # by X-Internal-Service-Secret, NOT gateway headers. See app/api/internal.py.
     app.include_router(internal_router, prefix=settings.api_prefix)
+
+    # Install/uninstall hint from entity-manager: verified by the derived
+    # notification token, it only triggers a reconcile (SDK).
+    app.include_router(
+        lifecycle_hint_router(f"{settings.api_prefix}/internal/lifecycle", _hint_reconcile)
+    )
 
     return app
 
