@@ -88,6 +88,29 @@ def test_fetch_weather_alerts():
         assert get.call_args[0][0] == "http://w/api/weather/parcel/urn:p:1/alerts"
 
 
+def test_fetch_weather_alerts_is_signed(monkeypatch):
+    """weather-api trusts X-Tenant-ID only with a valid platform signature."""
+    from nkz_platform_sdk.crypto import verify_hmac_signature
+
+    monkeypatch.setenv("HMAC_SECRET", "k")
+    with patch("app.worker.sources.requests.get") as get:
+        get.return_value.status_code = 200
+        get.return_value.json.return_value = {"alerts": []}
+        sources.fetch_weather_alerts("http://w", "t1", "urn:p:1")
+        headers = get.call_args.kwargs["headers"]
+        assert headers["X-Tenant-ID"] == "t1"
+        assert verify_hmac_signature("k", headers["X-Auth-Signature"], "", "t1")
+
+
+def test_fetch_weather_alerts_unsigned_without_secret(monkeypatch):
+    monkeypatch.delenv("HMAC_SECRET", raising=False)
+    with patch("app.worker.sources.requests.get") as get:
+        get.return_value.status_code = 200
+        get.return_value.json.return_value = {"alerts": []}
+        sources.fetch_weather_alerts("http://w", "t1", "urn:p:1")
+        assert "X-Auth-Signature" not in get.call_args.kwargs["headers"]
+
+
 def test_fetch_daily_temp_means_aggregates_by_day(monkeypatch):
     series = [
         (20.0, "2026-09-28T10:00:00"),

@@ -5,9 +5,11 @@ Cada fuente se consulta por parcela con el patrón canónico de relación
 Todo vía SDK (SyncOrionClient) o psycopg2 — nunca requests crudo a Orion.
 """
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 import requests
+from nkz_platform_sdk.crypto import generate_hmac_signature
 
 from app.worker import weather_source
 from app.worker.crop_cycles import accumulation_start
@@ -126,11 +128,26 @@ def fetch_parcel_crop_health(orion, parcel_id: str) -> Optional[Dict[str, Any]]:
 # ── Weather alerts (weather-api) ───────────────────────────────────────
 
 
+def _weather_api_headers(tenant_id: str) -> Dict[str, str]:
+    """Service identity for weather-api: the tenant plus the platform signature.
+
+    weather-api trusts X-Tenant-ID only when X-Auth-Signature verifies; a
+    service call has no user token, so the signed token is empty (SDK
+    convention). Without HMAC_SECRET the call goes unsigned and a backend
+    that requires the signature answers 401, logged below.
+    """
+    headers = {"X-Tenant-ID": tenant_id, "X-User-ID": "risk-worker"}
+    secret = os.getenv("HMAC_SECRET", "")
+    if secret:
+        headers["X-Auth-Signature"] = generate_hmac_signature(secret, "", tenant_id)
+    return headers
+
+
 def fetch_weather_alerts(weather_api_url: str, tenant_id: str, parcel_id: str) -> List[dict]:
     try:
         resp = requests.get(
             f"{weather_api_url}/api/weather/parcel/{parcel_id}/alerts",
-            headers={"X-Tenant-ID": tenant_id, "X-User-ID": "risk-worker"},
+            headers=_weather_api_headers(tenant_id),
             timeout=10,
         )
         if resp.status_code == 200:
