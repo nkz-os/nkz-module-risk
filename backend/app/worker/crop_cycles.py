@@ -1,29 +1,38 @@
-"""Accumulation start of a parcel's crop cycle, from the platform (sync)."""
+"""Accumulation start of a parcel's crop cycle, from the platform rule (sync).
+
+The SDK reads the parcel's crops and operations from the broker and resolves
+the cycles here (``fetch_crop_timeline``); no core service in between.
+"""
+import asyncio
 import logging
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date
 from typing import Optional
 
-import requests
-
-from app.config import get_settings
+from nkz_platform_sdk.crop_timeline import fetch_crop_timeline
 
 logger = logging.getLogger(__name__)
 
 
+def _run(coro):
+    """Run a coroutine from sync code, also when called inside a running loop
+    (the internal evaluate route is async and calls the worker synchronously)."""
+    try:
+        asyncio.get_running_loop()
+    except RuntimeError:
+        return asyncio.run(coro)
+    with ThreadPoolExecutor(max_workers=1) as pool:
+        return pool.submit(asyncio.run, coro).result()
+
+
 def accumulation_start(tenant_id: str, parcel_id: str) -> Optional[date]:
-    """Degree-day accumulation start resolved by entity-manager; None if unavailable."""
-    settings = get_settings()
+    """Degree-day accumulation start of the parcel's crop cycle; None if unavailable."""
     urn = parcel_id if parcel_id.startswith("urn:") else f"urn:ngsi-ld:AgriParcel:{parcel_id}"
     try:
-        resp = requests.get(
-            f"{settings.entity_manager_url.rstrip('/')}/api/internal/parcels/{urn}/crop-cycles",
-            params={"tenant_id": tenant_id},
-            headers={"X-Internal-Service-Secret": settings.internal_service_secret},
-            timeout=8,
-        )
-        if resp.status_code == 200:
-            return date.fromisoformat(resp.json()["accumulation"]["start"])
-        logger.warning("crop-cycle start for %s: HTTP %s", urn, resp.status_code)
-    except (requests.RequestException, KeyError, TypeError, ValueError) as e:
+        timeline = _run(fetch_crop_timeline(tenant_id, urn))
+        if timeline is None:
+            return None
+        return date.fromisoformat(timeline["accumulation"]["start"])
+    except (KeyError, TypeError, ValueError) as e:
         logger.warning("crop-cycle start unavailable for %s: %s", urn, e)
     return None
