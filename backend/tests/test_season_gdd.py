@@ -158,29 +158,47 @@ def test_without_opt_in_platform_is_not_called(monkeypatch):
 def test_platform_unreachable_falls_back_to_doy(monkeypatch):
     from app.worker import crop_cycles
 
-    def down(*a, **k):
-        raise crop_cycles.requests.ConnectionError("down")
+    async def down(*a, **k):
+        return None  # the SDK answers None when the broker cannot
 
-    monkeypatch.setattr(crop_cycles.requests, "get", down)
+    monkeypatch.setattr(crop_cycles, "fetch_crop_timeline", down)
     assert crop_cycles.accumulation_start("t", "p1") is None
 
 
-def test_platform_start_is_read_with_the_internal_secret(monkeypatch):
+def test_platform_start_comes_from_the_sdk_timeline(monkeypatch):
     from app.worker import crop_cycles
 
     seen = {}
 
-    class _Resp:
-        status_code = 200
+    async def fake(tenant_id, parcel_id, at=None, **kw):
+        seen.update(tenant=tenant_id, parcel=parcel_id)
+        return {"accumulation": {"start": "2026-03-12", "basis": "cycle_start"}}
 
-        def json(self):
-            return {"accumulation": {"start": "2026-03-12", "basis": "cycle_start"}}
-
-    def fake_get(url, params=None, headers=None, timeout=None):
-        seen.update(url=url, params=params, headers=headers)
-        return _Resp()
-
-    monkeypatch.setattr(crop_cycles.requests, "get", fake_get)
+    monkeypatch.setattr(crop_cycles, "fetch_crop_timeline", fake)
     assert crop_cycles.accumulation_start("t", "p1") == date(2026, 3, 12)
-    assert seen["url"].endswith("/api/internal/parcels/urn:ngsi-ld:AgriParcel:p1/crop-cycles")
-    assert seen["params"] == {"tenant_id": "t"} and "X-Internal-Service-Secret" in seen["headers"]
+    assert seen == {"tenant": "t", "parcel": "urn:ngsi-ld:AgriParcel:p1"}
+
+
+def test_platform_start_works_inside_a_running_event_loop(monkeypatch):
+    """Defensive: a caller inside a running loop must not crash on asyncio.run."""
+    import asyncio
+
+    from app.worker import crop_cycles
+
+    async def fake(*a, **k):
+        return {"accumulation": {"start": "2026-03-12", "basis": "cycle_start"}}
+
+    monkeypatch.setattr(crop_cycles, "fetch_crop_timeline", fake)
+
+    async def inside_loop():
+        return crop_cycles.accumulation_start("t", "p1")
+
+    assert asyncio.run(inside_loop()) == date(2026, 3, 12)
+
+
+def test_no_core_endpoint_left():
+    import inspect
+
+    from app.worker import crop_cycles
+
+    assert "/crop-cycles" not in inspect.getsource(crop_cycles)
