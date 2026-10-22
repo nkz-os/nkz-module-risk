@@ -1,0 +1,104 @@
+# =============================================================================
+# Risk Module — Backend API (nkz-module-risk)
+# =============================================================================
+# Reference manifest. Production values (image digest/SHA, CORS, URLs) live in
+# gitops-config/overlays/modules/risk/ — this public repo carries placeholders.
+# =============================================================================
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: risk-module-api
+  namespace: nekazari
+  labels:
+    app: risk-module-api
+    component: backend
+    module: risk
+    nkz-os.org/profile: addon
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: risk-module-api
+  template:
+    metadata:
+      labels:
+        app: risk-module-api
+        component: backend
+        module: risk
+    spec:
+      containers:
+        - name: backend
+          image: ghcr.io/nkz-os/nkz-module-risk/risk-api@sha256:PLACEHOLDER
+          imagePullPolicy: IfNotPresent
+          ports:
+            - name: http
+              containerPort: 8000
+          # Non-secret config (service URLs, CORS origins) belongs in a
+          # ConfigMap overlay in gitops-config/overlays/modules/risk/ — NOT in
+          # this public repo. `optional: true` so config.py defaults apply when
+          # the ConfigMap doesn't exist.
+          envFrom:
+            - configMapRef:
+                name: risk-config
+                optional: true
+          env:
+            - name: API_PREFIX
+              value: "/api/risk"
+            - name: ORION_LD_URL
+              value: "http://orion-ld-service:1026"
+            - name: CONTEXT_URL
+              value: "http://api-gateway-service:5000/ngsi-ld-context.json"
+            # Database (MANDATORY — the module writes risk.* metadata). Fail-fast
+            # at startup if unset (app/config.py:require_postgres_url).
+            - name: POSTGRES_URL
+              valueFrom:
+                secretKeyRef:
+                  name: postgresql-secret
+                  key: postgres-url
+            # Internal service-to-service auth (/internal/* routes only),
+            # hmac.compare_digest verification. Shared K8s secret.
+            - name: INTERNAL_SERVICE_SECRET
+              valueFrom:
+                secretKeyRef:
+                  name: internal-service-secret
+                  key: INTERNAL_SERVICE_SECRET
+                  optional: true
+          resources:
+            requests:
+              memory: "128Mi"
+              cpu: "100m"
+            limits:
+              memory: "256Mi"
+              cpu: "200m"
+          livenessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 15
+            periodSeconds: 30
+            timeoutSeconds: 5
+          readinessProbe:
+            httpGet:
+              path: /health
+              port: 8000
+            initialDelaySeconds: 5
+            periodSeconds: 10
+            timeoutSeconds: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: risk-module-api-service
+  namespace: nekazari
+  labels:
+    app: risk-module-api
+    module: risk
+spec:
+  type: ClusterIP
+  ports:
+    - port: 8000
+      targetPort: 8000
+      protocol: TCP
+      name: http
+  selector:
+    app: risk-module-api

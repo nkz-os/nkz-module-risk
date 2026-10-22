@@ -1,0 +1,90 @@
+{
+  "example": {
+    "title": "Risk",
+    "loading": "Loading…",
+    "authRequired": "Authentication required.",
+    "entity": "Entity",
+    "user": "User",
+    "refresh": "Refresh",
+    "replaceHint": "Replace this component with your module's functionality."
+  },
+  "monitor": {
+    "title": "Risk Alerts",
+    "loading": "Loading…",
+    "empty": "No active alerts.",
+    "tab": "Monitor",
+    "dismiss": "Dismiss",
+    "dismissing": "Dismissing…",
+    "dismissHint": "Close this alert. It will not come back while the condition persists.",
+    "dismissError": "Could not dismiss the alert."
+  },
+  "title": {
+    "es": "Avisos de Riesgo",
+    "en": "Risk Alerts"
+  },
+  "config": {
+    "tab": "Configuration",
+    "loading": "Loading…",
+    "notifications_moved": "Notification channel settings have moved to the Notifications module.",
+    "go_to_notifications": "Go to Notifications",
+    "saving": "Saving…",
+    "subscriptions": "Alert subscriptions",
+    "empty": "No alert types",
+    "on": "On",
+    "off": "Off",
+    "threshold": "Threshold"
+  },
+  "integrations": {
+    "tab": "Integrations",
+    "new": "New webhook",
+    "name": "Name",
+    "url": "URL",
+    "secret_optional": "Secret (optional)",
+    "add": "Add",
+    "empty": "No webhooks",
+    "remove": "Remove"
+  },
+  "custom": {
+    "tab": "Custom",
+    "created": "Risk created",
+    "name": "Risk name",
+    "description": "Description",
+    "logic": "Logic",
+    "condition": "Add condition",
+    "create": "Create risk",
+    "duration": "dur. (min)",
+    "remove": "Remove",
+    "group": "Add group",
+    "atLeast": "at least",
+    "conditions": "conditions",
+    "noAggregate": "no aggregate"
+  },
+  "subtitle": "Risks and alerts for your parcels",
+  "context": {
+    "title": "Parcel alerts",
+    "empty": "No alerts for this entity"
+  },
+  "widget": {
+    "title": "Recent alerts",
+    "empty": "No active alerts"
+  },
+  "catalog": {
+    "tab": "Catalog",
+    "description": "Risk definitions: activate or deactivate, applicable crops and documentation.",
+    "cropGroups": "Crops",
+    "active": "Active",
+    "inactive": "Inactive",
+    "remove": "Remove",
+    "category": {
+      "disease": "Diseases",
+      "pest": "Pests",
+      "weather": "Weather",
+      "agronomic": "Agronomic",
+      "robotic": "Robotic",
+      "energy": "Energy",
+      "sensor": "Sensors",
+      "crop": "Crop",
+      "default": "Category"
+    }
+  }
+}

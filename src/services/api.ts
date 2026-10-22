@@ -1,0 +1,93 @@
+/**
+ * API Client for Risk — canonical NKZClient + useAuth pattern.
+ */
+import { NKZClient, useAuth } from '@nekazari/sdk';
+
+const API_BASE = (import.meta as any).env?.VITE_API_URL || 'https://your-api-domain';
+
+export interface AlertItem {
+  id: string;
+  category?: { value?: string } | string;
+  alertType?: { value?: string } | string;
+  severity?: { value?: string } | string;
+  status?: { value?: string } | string;
+  refEntity?: { object?: string } | string;
+  refEntityName?: string;
+}
+
+export interface CatalogItem {
+  alert_type: string;
+  name: string;
+  description?: string | null;
+  category: string;
+  model_type?: string | null;
+  is_active?: boolean;
+  applicable_crop_groups?: string[];
+  documentation?: Record<string, unknown> | null;
+}
+
+export interface Subscription {
+  id: number;
+  tenant_id: string;
+  alert_type: string;
+  is_active: boolean;
+  user_threshold: number;
+  channels: { email?: boolean; push?: boolean };
+  entity_filters?: Record<string, unknown>;
+}
+
+export interface Webhook {
+  id: string;
+  name: string;
+  url: string;
+  secret?: string | null;
+  min_severity: string;
+}
+
+export interface SourceCatalog {
+  [source: string]: { label: string; attributes: string[] };
+}
+
+export interface RiskCondition {
+  source: string;
+  attribute: string;
+  operator: string;
+  value: number | string | (number | string)[];
+  unit?: string | null;
+  duration_minutes?: number;
+  aggregate?: string | null;
+  severity?: string;
+}
+
+export interface RiskConditionGroup {
+  logical_operator?: string;
+  min_conditions?: number;
+  conditions: (RiskCondition | RiskConditionGroup)[];
+}
+
+export function useModuleApi() {
+  const { getToken, getTenantId } = useAuth();
+
+  const client = new NKZClient({
+    baseUrl: `${API_BASE}/api/risk`,
+    getToken,
+    getTenantId,
+  });
+
+  return {
+    getAlerts: () => client.get<{ alerts: AlertItem[]; count: number }>('/alerts'),
+    dismissAlert: (id: string) =>
+      client.post<{ id: string; status: string }>(`/alerts/${encodeURIComponent(id)}/dismiss`, {}),
+    getCatalog: () => client.get<CatalogItem[]>('/catalog'),
+    getSubscriptions: () => client.get<Subscription[]>('/subscriptions'),
+    createSubscription: (d: Partial<Subscription>) => client.post<Subscription>('/subscriptions', d),
+    updateSubscription: (id: number, d: Partial<Subscription>) => client.patch<Subscription>(`/subscriptions/${id}`, d),
+    getWebhooks: () => client.get<Webhook[]>('/webhooks'),
+    createWebhook: (d: { name: string; url: string; secret?: string; min_severity: string }) => client.post<Webhook>('/webhooks', d),
+    deleteWebhook: (id: string) => client.delete<void>(`/webhooks/${id}`),
+    getCatalogSources: () => client.get<SourceCatalog>('/catalog/sources'),
+    createCustomRisk: (d: { name: string; description?: string; category?: string; target_sdm_type?: string; data_sources: string[]; conditions: RiskConditionGroup }) => client.post<{ alert_type: string }>('/catalog/custom', d),
+    updateCatalog: (alert_type: string, d: Partial<CatalogItem>) => client.patch<CatalogItem>(`/catalog/${alert_type}`, d),
+    deleteCatalog: (alert_type: string) => client.delete<void>(`/catalog/${alert_type}`),
+  };
+}

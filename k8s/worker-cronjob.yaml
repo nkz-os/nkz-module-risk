@@ -1,0 +1,50 @@
+# =============================================================================
+# Risk Module — Worker (evaluación batch horaria)
+# =============================================================================
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: risk-module-worker
+  namespace: nekazari
+  labels:
+    app: risk-module-worker
+    module: risk
+spec:
+  schedule: "15 * * * *"
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  concurrencyPolicy: Forbid
+  jobTemplate:
+    spec:
+      template:
+        metadata:
+          labels:
+            app: risk-module-worker
+            module: risk
+        spec:
+          restartPolicy: OnFailure
+          containers:
+            - name: worker
+              image: ghcr.io/nkz-os/nkz-module-risk/risk-worker@sha256:PLACEHOLDER
+              imagePullPolicy: IfNotPresent
+              envFrom:
+                - configMapRef:
+                    name: risk-config
+                    optional: true
+              env:
+                - name: ORION_LD_URL
+                  value: "http://orion-ld-service:1026"
+                - name: CONTEXT_URL
+                  value: "http://api-gateway-service:5000/ngsi-ld-context.json"
+                - name: POSTGRES_URL
+                  valueFrom:
+                    secretKeyRef:
+                      name: postgresql-secret
+                      key: postgres-url
+              resources:
+                requests:
+                  memory: "128Mi"
+                  cpu: "100m"
+                limits:
+                  memory: "512Mi"
+                  cpu: "500m"

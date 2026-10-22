@@ -1,0 +1,376 @@
+"""Fetchers de fuentes de datos agronómicas para el worker.
+
+Cada fuente se consulta por parcela con el patrón canónico de relación
+`hasAgriParcel | refAgriParcel` (Orion-LD, per-tenant) o contra TimescaleDB.
+Todo vía SDK (SyncOrionClient) o psycopg2 — nunca requests crudo a Orion.
+"""
+import logging
+import os
+from typing import Any, Dict, List, Optional
+
+import requests
+from nkz_platform_sdk.crypto import generate_hmac_signature
+
+from app.worker import weather_source
+from app.worker.crop_cycles import accumulation_start
+
+logger = logging.getLogger(__name__)
+
+_PARCEL_Q = 'hasAgriParcel=="{p}"|refAgriParcel=="{p}"'
+
+
+def query_by_parcel(orion, entity_type: str, parcel_id: str, limit: int = 1) -> List[Dict[str, Any]]:
+    return orion.query_entities(
+        type=entity_type, q=_PARCEL_Q.format(p=parcel_id), limit=limit
+    )
+
+
+def _value(entity: Dict[str, Any], name: str) -> Any:
+    attr = entity.get(name)
+    if isinstance(attr, dict):
+        return attr.get("value", attr.get("object"))
+    return attr
+
+
+# ── Weather + GDD (delegadas a weather_source, ya portada) ──────────────
+
+
+def fetch_parcel_weather(orion_ld_url: str, tenant_id: str, parcel_id: str):
+    return weather_source.fetch_parcel_weather(orion_ld_url, tenant_id, parcel_id)
+
+
+def fetch_season_gdd(conn, tenant_id: str, parcel_id: str, season_start_doy: int = 1,
+                     season_start: str | None = None):
+    # season_start="crop_cycle" anchors the season to the parcel's crop cycle
+    # (platform resolution); unreachable platform -> the day-of-year default.
+    override = accumulation_start(tenant_id, parcel_id) if season_start == "crop_cycle" else None
+    return weather_source.fetch_season_gdd(
+        conn, tenant_id, season_start_doy, parcel_id, season_start_override=override,
+    )
+
+
+# ── Soil (nkz-module-soil) ─────────────────────────────────────────────
+
+
+def _top_horizon(entity: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    """Horizonte superior (0-X cm) del AgriSoilExtended, que es donde viven
+    textura/awc/fieldCapacity/wiltingPoint/ec (no a nivel de entidad)."""
+    horizons = _value(entity, "horizons")
+    if isinstance(horizons, list) and horizons and isinstance(horizons[0], dict):
+        return horizons[0]
+    return None
+
+
+def fetch_parcel_soil(orion, parcel_id: str) -> Optional[Dict[str, Any]]:
+    for etype in ("AgriSoilExtended", "AgriSoil"):
+        rows = query_by_parcel(orion, etype, parcel_id, limit=1)
+        if not rows:
+            continue
+        e = rows[0]
+        h = _top_horizon(e)
+        if h is None:
+            continue
+        return {
+            "type": etype,
+            "texture": h.get("usdaTextureClass"),
+            "awc": h.get("availableWaterCapacity"),
+            "field_capacity": h.get("fieldCapacity"),
+            "wilting_point": h.get("wiltingPoint"),
+            # EC (salinidad) del horizonte — viene de LUCAS (ec_ds_m, dS/m).
+            "ec": h.get("ec"),
+        }
+    return None
+
+
+# ── Vegetation (nkz-module-vegetation-health) ──────────────────────────
+
+
+def fetch_parcel_ndvi(orion, parcel_id: str) -> Optional[Dict[str, Any]]:
+    rows = query_by_parcel(orion, "EOProduct", parcel_id, limit=1)
+    if not rows:
+        return None
+    e = rows[0]
+    return {
+        "ndvi": _value(e, "ndvi"),
+        "savi": _value(e, "savi"),
+        "observed_at": _value(e, "observedAt"),
+    }
+
+
+# ── Crop health (nkz-module-crop-health) ───────────────────────────────
+
+
+def fetch_parcel_crop_health(orion, parcel_id: str) -> Optional[Dict[str, Any]]:
+    rows = query_by_parcel(orion, "CropHealthAssessment", parcel_id, limit=10)
+    for e in rows:
+        # Saltar stubs placeholder (status=pending / provenance=placeholder) y
+        # entidades sin severidad: no son evaluaciones reales.
+        status = _value(e, "status")
+        if status and str(status).lower() == "pending":
+            continue
+        if _value(e, "overallSeverity") is None:
+            continue
+        return {
+            "cwsi": _value(e, "cwsiValue"),
+            "overall_severity": _value(e, "overallSeverity"),
+            "recommended_action": _value(e, "recommendedAction"),
+            "compaction_risk_score": _value(e, "compactionRiskScore"),
+            "soil_water_mm": _value(e, "soilWaterMm"),
+            "soil_awc_mm": _value(e, "soilAWCmm"),
+            "soil_water_ratio": _value(e, "soilWaterRatio"),
+            "vhi": _value(e, "vhi"),
+            "vci": _value(e, "vci"),
+            "gdd_accumulated": _value(e, "gddAccumulated"),
+        }
+    return None
+
+
+# ── Weather alerts (weather-api) ───────────────────────────────────────
+
+
+def _weather_api_headers(tenant_id: str) -> Dict[str, str]:
+    """Service identity for weather-api: the tenant plus the platform signature.
+
+    weather-api trusts X-Tenant-ID only when X-Auth-Signature verifies; a
+    service call has no user token, so the signed token is empty (SDK
+    convention). Without HMAC_SECRET the call goes unsigned and a backend
+    that requires the signature answers 401, logged below.
+    """
+    headers = {"X-Tenant-ID": tenant_id, "X-User-ID": "risk-worker"}
+    secret = os.getenv("HMAC_SECRET", "")
+    if secret:
+        headers["X-Auth-Signature"] = generate_hmac_signature(secret, "", tenant_id)
+    return headers
+
+
+def fetch_weather_alerts(weather_api_url: str, tenant_id: str, parcel_id: str) -> List[dict]:
+    try:
+        resp = requests.get(
+            f"{weather_api_url}/api/weather/parcel/{parcel_id}/alerts",
+            headers=_weather_api_headers(tenant_id),
+            timeout=10,
+        )
+        if resp.status_code == 200:
+            return resp.json().get("alerts", []) or []
+        logger.warning(
+            "weather-alerts fetch %s for %s: %s",
+            resp.status_code, parcel_id, resp.text[:200],
+        )
+    except Exception as e:
+        logger.debug("weather-alerts fetch failed for %s: %s", parcel_id, e)
+    return []
+
+
+# ── Telemetry (TimescaleDB) ────────────────────────────────────────────
+
+
+def fetch_telemetry(conn, tenant_id: str, device_id: str, metric_name: str, hours: int = 24):
+    try:
+        cursor = conn.cursor()
+        cursor.execute(
+            """
+            SELECT value, observed_at
+            FROM telemetry_measurements
+            WHERE tenant_id = %s AND device_id = %s AND attribute_name = %s
+              AND observed_at >= NOW() - INTERVAL '%s hours'
+            ORDER BY observed_at DESC LIMIT 1
+            """,
+            (tenant_id, device_id, metric_name, hours),
+        )
+        row = cursor.fetchone()
+        cursor.close()
+        if not row:
+            return None
+        if isinstance(row, dict):
+            return {"value": row["value"], "observed_at": row["observed_at"]}
+        return {"value": row[0], "observed_at": row[1]}
+    except Exception as e:
+        logger.error("telemetry fetch failed for %s/%s: %s", tenant_id, device_id, e)
+        return None
+
+
+# ── Series temporales (duration_minutes) ────────────────────────────
+# Mapa inverso: flat key -> (attribute_name en telemetry_measurements, converter).
+# Solo los atributos que el feed de WeatherObserved escribe como serie soportan
+# `duration_minutes`; el resto (p.ej. temp_min/temp_max, que viven solo en
+# WeatherForecast) cae al valor puntual.
+_FLAT_TO_NGSI = {
+    "temp_avg": ("airTemperature", None),
+    "temperature": ("tempCurrent", None),
+    "humidity": ("humidity", None),
+    "humidity_avg": ("humidity", None),
+    "precip_mm": ("precipitation", None),
+    "precipitation": ("precipitation", None),
+    "eto_mm": ("et0", None),
+    "delta_t": ("deltaT", None),
+    "wind_speed_ms": ("windSpeed", None),
+    "wind_direction_deg": ("windDirection", None),
+    "solar_rad_w_m2": ("solarRadiation", None),
+    "solar_rad_ghi_w_m2": ("solarRadiation", None),
+    "radiation": ("solarRadiation", None),
+    "pressure_hpa": ("atmosphericPressure", None),
+    "soil_moisture_0_10cm": ("soilMoistureTop", weather_source._percent),
+    "soil_moisture_10_40cm": ("soilMoistureSub", weather_source._percent),
+    "gdd_accumulated": ("gddAccumulated", None),
+}
+
+
+def fetch_weather_series(
+    conn, tenant_id: str, parcel_id: str, attribute: str, minutes: int
+) -> Optional[List[tuple]]:
+    """Serie temporal de un atributo weather sobre [now - minutes, now].
+
+    Lee el feed que la suscripción de WeatherObserved vuelca en
+    telemetry_measurements (entity_id = id canónico de WeatherObserved).
+    Devuelve [(valor, observed_at), ...] (ascendente) o None si el atributo
+    no tiene serie disponible.
+    """
+    entry = _FLAT_TO_NGSI.get(attribute)
+    if entry is None:
+        return None
+    ngsi_name, convert = entry
+    entity_id = weather_source.weather_observed_id(tenant_id, parcel_id)
+    try:
+        cur = conn.cursor()
+        cur.execute(
+            """
+            SELECT value, observed_at
+            FROM telemetry_measurements
+            WHERE tenant_id = %s AND entity_id = %s AND attribute_name = %s
+              AND observed_at >= NOW() - make_interval(mins => %s)
+            ORDER BY observed_at ASC
+            """,
+            (tenant_id, entity_id, ngsi_name, minutes),
+        )
+        rows = cur.fetchall()
+        cur.close()
+        out = []
+        for row in rows:
+            if isinstance(row, dict):
+                v, t = row["value"], row["observed_at"]
+            else:
+                v, t = row[0], row[1]
+            out.append((convert(v) if convert else v, t))
+        return out
+    except Exception as e:
+        logger.error("weather series fetch failed for %s/%s: %s", tenant_id, attribute, e)
+        return None
+
+
+def fetch_series(
+    conn, tenant_id: str, parcel_id: str, source: str, attribute: str, minutes: int
+) -> Optional[List[tuple]]:
+    """Serie temporal genérica por (source, attribute) — None si no hay serie."""
+    if source == "weather":
+        return fetch_weather_series(conn, tenant_id, parcel_id, attribute, minutes)
+    return None
+
+
+def fetch_leaf_wetness(conn, tenant_id: str, parcel_id: str, window_hours: int = 24):
+    """Horas de mojado foliar (LWD) estimadas por NHRH (RH>=90%) sobre la ventana.
+
+    Fuente derivada: no hay sensor de mojado, se estima a partir de la serie de
+    humedad relativa del feed de WeatherObserved (ya en telemetry_measurements).
+    El feed muestrea ~cada 2h (no 1h), así que el conteo se escala por el
+    intervalo real entre muestras para no infra-contar las horas de mojado.
+    """
+    from app.worker.models.lwd_estimator import estimate_lwd_nhrh
+
+    series = fetch_weather_series(conn, tenant_id, parcel_id, "humidity", window_hours * 60)
+    if not series:
+        return None
+    hourly_rh = [v for v, _t in series]
+    count = estimate_lwd_nhrh(hourly_rh)
+    hours = round(count * _average_interval_hours(series), 1)
+    return {"hours": hours, "method": "estimated_NHRH"}
+
+
+def _average_interval_hours(series: List[tuple]) -> float:
+    """Intervalo medio (h) entre muestras consecutivas; ignora huecos > 6h."""
+    from datetime import datetime
+
+    prev = None
+    intervals: List[float] = []
+    for _, ts in series:
+        t = ts if isinstance(ts, datetime) else datetime.fromisoformat(str(ts).replace("Z", "+00:00"))
+        if prev is not None:
+            d = (t - prev).total_seconds() / 3600.0
+            if 0 < d < 6.0:
+                intervals.append(d)
+        prev = t
+    return (sum(intervals) / len(intervals)) if intervals else 1.0
+
+
+def fetch_daily_temp_means(conn, tenant_id: str, parcel_id: str, days: int = 5) -> Optional[List[float]]:
+    """Medias diarias de temperatura (últimos N días), más reciente al final.
+
+    Agrega la serie de temp_avg (airTemperature) del feed de WeatherObserved en
+    medias por día, para los modelos epidemiológicos basados en temperatura
+    (Gubler-Thomas). Devuelve None si no hay serie disponible.
+    """
+    series = fetch_weather_series(conn, tenant_id, parcel_id, "temp_avg", days * 24 * 60)
+    if not series:
+        return None
+    by_day: Dict[str, List[float]] = {}
+    for v, ts in series:
+        by_day.setdefault(str(ts)[:10], []).append(v)
+    out = [round(sum(vals) / len(vals), 1) for _, vals in sorted(by_day.items())]
+    return out or None
+
+
+# ── Registry de fuentes por parcela ────────────────────────────────────
+# Cada entrada es un callable (ctx, parcel_id, risk) -> data. Añadir una fuente
+# nueva = añadir una entrada aquí (no hay que tocar processor.py).
+def build_fetch_context(orion, conn, settings, tenant_id: str) -> dict:
+    return {"orion": orion, "conn": conn, "settings": settings, "tenant_id": tenant_id}
+
+
+SOURCE_FETCHERS = {
+    "weather": lambda ctx, pid, risk: fetch_parcel_weather(
+        ctx["settings"].orion_ld_url, ctx["tenant_id"], pid
+    ),
+    "gdd": lambda ctx, pid, risk: fetch_season_gdd(
+        ctx["conn"], ctx["tenant_id"], pid,
+        (risk.get("model_config") or {}).get("season_start_doy", 1),
+        (risk.get("model_config") or {}).get("season_start"),
+    ),
+    "soil": lambda ctx, pid, risk: fetch_parcel_soil(ctx["orion"], pid),
+    "ndvi": lambda ctx, pid, risk: fetch_parcel_ndvi(ctx["orion"], pid),
+    "crop_health": lambda ctx, pid, risk: fetch_parcel_crop_health(ctx["orion"], pid),
+    "weather_alerts": lambda ctx, pid, risk: fetch_weather_alerts(
+        ctx["settings"].weather_api_url, ctx["tenant_id"], pid
+    ),
+    "leaf_wetness": lambda ctx, pid, risk: fetch_leaf_wetness(
+        ctx["conn"], ctx["tenant_id"], pid
+    ),
+}
+
+
+# ── Catálogo de fuentes (para la UI: autocompletado de atributos) ──────
+SOURCE_CATALOG = {
+    "weather": {
+        "label": "Meteorología",
+        "attributes": [
+            "temp_min", "temp_max", "temp_avg", "humidity", "precip_mm",
+            "wind_speed_ms", "wind_direction_deg", "eto_mm", "solar_rad_w_m2",
+            "pressure_hpa", "soil_moisture_0_10cm", "soil_moisture_10_40cm",
+            "gdd_accumulated",
+        ],
+    },
+    "soil": {
+        "label": "Suelo",
+        "attributes": ["texture", "awc", "field_capacity", "wilting_point", "ec"],
+    },
+    "ndvi": {"label": "Vegetación (índice)", "attributes": ["ndvi", "savi"]},
+    "crop_health": {
+        "label": "Salud de cultivo",
+        "attributes": [
+            "cwsi", "compaction_risk_score", "soil_water_ratio",
+            "vhi", "vci", "gdd_accumulated",
+        ],
+    },
+    "gdd": {"label": "Grados-día", "attributes": ["gdd_season_total", "days_accumulated"]},
+    "weather_alerts": {"label": "Avisos meteorológicos", "attributes": []},
+    "leaf_wetness": {"label": "Mojado foliar", "attributes": ["hours"]},
+    "telemetry": {"label": "Telemetría de dispositivo", "attributes": ["value"]},
+}

@@ -1,0 +1,324 @@
+"""Worker: evalúa riesgos del catálogo (con fuentes de datos reales) y publica Alert.
+
+Fase 3: `_prepare_data_sources` monta las fuentes agronómicas (weather, gdd,
+telemetry, weather_alerts, soil, ndvi, crop_health) desde Orion-LD per-tenant
+y TimescaleDB. Además, el estrés de cultivo (CropHealthAssessment de
+crop-health) se consume como una alerta de categoría `crop`.
+"""
+import logging
+from datetime import datetime, timezone
+from typing import Any, Dict, List, Optional, Set
+
+from nkz_platform_sdk import SyncOrionClient
+
+from app.alerts.contract import alert_entity_id, severity_for_score
+from app.config import get_settings
+from app.worker import alert_lifecycle as lifecycle
+from app.worker import sources, weather_source
+from app.worker.alert_publisher import publish_alert
+from app.worker.models.factory import RiskModelFactory
+from app.worker.models.threshold_model import series_requests
+
+logger = logging.getLogger(__name__)
+
+PUBLISH_THRESHOLD = 50.0
+
+# model_types de los modelos epidemiológicos del catálogo, que consumen series
+# temporales (temperatura diaria + LWD + lluvia 48h) en vez de valores puntuales.
+DISEASE_MODEL_TYPES = {"gubler_pm", "magarey_mildew", "mills_scab", "tomcast_alternaria"}
+
+
+def _get_catalog(conn) -> List[Dict[str, Any]]:
+    with conn.cursor() as cur:
+        cur.execute(
+            "SELECT alert_type, name, category, model_type, model_config, "
+            "severity_levels, target_sdm_type, data_sources, applicable_crop_groups "
+            "FROM risk.alert_catalog WHERE is_active = true"
+        )
+        return [dict(r) for r in cur.fetchall()]
+
+
+def _get_entities(orion: SyncOrionClient, entity_type: str) -> List[Dict[str, Any]]:
+    return orion.query_entities(type=entity_type, limit=200)
+
+
+def _parcel_crop_group(orion: SyncOrionClient, entity: Dict[str, Any]) -> str | None:
+    """Resuelve el crop_group de una parcela desde hasAgriCrop -> AgriCrop.category."""
+    rel = entity.get("hasAgriCrop")
+    crop_id = rel.get("object") if isinstance(rel, dict) else rel
+    if not crop_id or not isinstance(crop_id, str):
+        return None
+    try:
+        crop = orion.get_entity(crop_id)
+    except Exception:
+        return None
+    if not crop:
+        return None
+    category = crop.get("category")
+    if isinstance(category, dict):
+        category = category.get("value")
+    return category or None
+
+
+def _prepare_data_sources(tenant_id, risk, entity, orion, conn, settings) -> Dict[str, Any]:
+    """Monta el dict de fuentes que el modelo consume, según risk.data_sources."""
+    parcel_id = weather_source.resolve_parcel_id(entity)
+    required = risk.get("data_sources") or []
+    ctx = sources.build_fetch_context(orion, conn, settings, tenant_id)
+    data: Dict[str, Any] = {}
+
+    for src in required:
+        if src == "telemetry":
+            entity_id = entity.get("id", "")
+            etype = entity.get("type", "")
+            if "Device" in etype or "Vehicle" in etype:
+                device_id = entity_id.split(":")[-1] if ":" in entity_id else entity_id
+                for metric in ("batteryLevel", "battery", "powerLevel"):
+                    val = sources.fetch_telemetry(conn, tenant_id, device_id, metric, hours=1)
+                    if val:
+                        data["telemetry"] = val
+                        break
+            continue
+        fetcher = sources.SOURCE_FETCHERS.get(src)
+        if fetcher and parcel_id:
+            data[src] = fetcher(ctx, parcel_id, risk)
+
+    # Series temporales para condiciones sostenidas (duration_minutes > 0).
+    for (src, attr), minutes in series_requests(risk.get("model_config")).items():
+        if src == "telemetry" or not parcel_id:
+            continue
+        series = sources.fetch_series(conn, tenant_id, parcel_id, src, attr, minutes)
+        if series is not None:
+            data.setdefault(src, {})[f"__series__{attr}"] = series
+        else:
+            logger.debug("no series for %s.%s (duration_minutes unsupported)", src, attr)
+
+    # Series para modelos epidemiológicos (temperatura diaria + LWD + lluvia 48h).
+    if risk.get("model_type") in DISEASE_MODEL_TYPES and parcel_id:
+        w = data.setdefault("weather", {})
+        daily = sources.fetch_daily_temp_means(conn, tenant_id, parcel_id, days=5)
+        if daily:
+            w["daily_temp_means"] = daily
+        lwd = sources.fetch_leaf_wetness(conn, tenant_id, parcel_id, window_hours=48)
+        if lwd:
+            w["lwd_hours"] = lwd["hours"]
+        precip = sources.fetch_weather_series(conn, tenant_id, parcel_id, "precip_mm", 48 * 60)
+        if precip:
+            # Cada valor es mm de la hora precedente; el feed muestrea ~2h, así
+            # que la suma infra-cuenta ~a la mitad. Escalar por el intervalo real.
+            w["precip_48h"] = round(
+                sum(v for v, _ in precip) * sources._average_interval_hours(precip), 1
+            )
+
+    return data
+
+
+def _apply_lifecycle(orion, tenant_id, alert_type, entity_id, score,
+                     existing, touched, now) -> bool:
+    """Aplica el ciclo de vida; True si toca publicar la Alert."""
+    aid = alert_entity_id(tenant_id, alert_type, entity_id)
+    action = lifecycle.decide((existing.get(aid) or {}).get("status"), score, PUBLISH_THRESHOLD)
+    if action == lifecycle.PUBLISH:
+        touched.add(aid)
+        return True
+    if action == lifecycle.SKIP:
+        touched.add(aid)
+    elif action == lifecycle.RESOLVE:
+        lifecycle.mark(orion, aid, "resolved", now)
+        touched.add(aid)
+    return False
+
+
+def _evaluate_crop_stress(
+    orion, tenant_id, settings,
+    existing: Optional[Dict[str, Dict[str, Any]]] = None,
+    touched: Optional[Set[str]] = None,
+    now: Optional[datetime] = None,
+) -> tuple[int, int]:
+    """CropHealthAssessment (crop-health) → Alert(category=crop) si severidad alta."""
+    existing = existing if existing is not None else {}
+    touched = touched if touched is not None else set()
+    now = now or datetime.now(timezone.utc)
+    evaluated = errors = 0
+    for parcel in _get_entities(orion, "AgriParcel"):
+        parcel_id = parcel.get("id")
+        if not parcel_id:
+            continue
+        ch = sources.fetch_parcel_crop_health(orion, parcel_id)
+        if not ch:
+            continue
+        sev = str(ch.get("overall_severity") or "").upper()
+        alert_sev = "critical" if sev == "CRITICAL" else "high"
+        score = {"CRITICAL": 90.0, "HIGH": 75.0}.get(sev, 0.0)
+        if not _apply_lifecycle(orion, tenant_id, "crop_stress", parcel_id, score,
+                                existing, touched, now):
+            continue
+        if publish_alert(
+            orion_ld_url=settings.orion_ld_url,
+            context_url=settings.context_url,
+            tenant_id=tenant_id,
+            entity_id=parcel_id,
+            entity_type="AgriParcel",
+            alert_type="crop_stress",
+            category="crop",
+            severity=alert_sev,
+            probability_score=score,
+            evaluation_data=ch,
+            confidence=1.0,
+        ):
+            evaluated += 1
+        else:
+            logger.warning("crop publish failed for %s", parcel_id)
+            errors += 1
+    return evaluated, errors
+
+
+def _evaluate_risks(
+    conn,
+    tenant_id: str,
+    parcel_filter: str | None = None,
+    include_crop_stress: bool = True,
+) -> Dict[str, int]:
+    """Evalúa los riesgos del catálogo y publica Alert.
+
+    `parcel_filter` (opcional) limita la evaluación a una única parcela — lo usa
+    el handler de notificaciones (Fase 2) al asignar cultivo. `include_crop_stress`
+    se desactiva en ese caso (el estrés de cultivo no lo dispara la asignación).
+    """
+    settings = get_settings()
+    catalog = _get_catalog(conn)
+    if not catalog:
+        return {"evaluated": 0, "errors": 0}
+
+    evaluated = errors = 0
+    now = datetime.now(timezone.utc)
+    touched: Set[str] = set()
+    with SyncOrionClient(tenant_id, base_url=settings.orion_ld_url, context_url=settings.context_url) as orion:
+        try:
+            existing = lifecycle.load_existing(orion)
+        except Exception as e:
+            # Sin el estado previo no se puede respetar un descarte: no se publica
+            # nada antes que reabrir alertas que el usuario cerró.
+            logger.error("Alert lifecycle: no se pudo leer el estado previo (%s); se omite el tenant", e)
+            return {"evaluated": 0, "errors": 1}
+
+        for risk in catalog:
+            model = RiskModelFactory.create_model(
+                risk["alert_type"], risk["category"], risk["model_config"], risk["model_type"]
+            )
+            if not model:
+                logger.warning("Sin modelo para %s (model_type=%s)", risk["alert_type"], risk["model_type"])
+                errors += 1
+                continue
+
+            for entity in _get_entities(orion, risk["target_sdm_type"]):
+                entity_id = entity.get("id")
+                if not entity_id:
+                    continue
+
+                if parcel_filter and entity_id != parcel_filter:
+                    continue
+
+                applicable = risk.get("applicable_crop_groups") or []
+                if applicable:
+                    crop_group = _parcel_crop_group(orion, entity)
+                    if crop_group not in applicable:
+                        continue
+
+                try:
+                    data_sources = _prepare_data_sources(tenant_id, risk, entity, orion, conn, settings)
+                    result = model.evaluate(
+                        entity_id=entity_id,
+                        entity_type=risk["target_sdm_type"],
+                        tenant_id=tenant_id,
+                        data_sources=data_sources,
+                    )
+                    score = float(result.get("probability_score", 0.0))
+                    if not _apply_lifecycle(orion, tenant_id, risk["alert_type"], entity_id,
+                                            score, existing, touched, now):
+                        continue
+                    severity = result.get("severity") or severity_for_score(score)
+                    if publish_alert(
+                        orion_ld_url=settings.orion_ld_url,
+                        context_url=settings.context_url,
+                        tenant_id=tenant_id,
+                        entity_id=entity_id,
+                        entity_type=risk["target_sdm_type"],
+                        alert_type=risk["alert_type"],
+                        category=risk["category"],
+                        severity=severity,
+                        probability_score=score,
+                        evaluation_data=result.get("evaluation_data", {}),
+                        confidence=result.get("confidence", 1.0),
+                    ):
+                        evaluated += 1
+                    else:
+                        logger.warning("publish failed for %s/%s", risk["alert_type"], entity_id)
+                        errors += 1
+                except Exception as e:
+                    logger.error("eval %s/%s: %s", risk["alert_type"], entity_id, e)
+                    errors += 1
+
+        # ── Estrés de cultivo (crop-health) — fuente externa, sin modelo factory ──
+        if include_crop_stress:
+            try:
+                ce, err = _evaluate_crop_stress(orion, tenant_id, settings, existing, touched, now)
+                evaluated += ce
+                errors += err
+            except Exception as e:
+                logger.warning("crop-stress evaluation skipped: %s", e)
+
+        # Caducidad: solo en la pasada completa, no en la de una parcela.
+        if parcel_filter is None:
+            try:
+                n = lifecycle.sweep_expired(
+                    orion, existing, touched,
+                    {r["alert_type"]: r.get("model_config") or {} for r in catalog}, now,
+                )
+                if n:
+                    logger.info("tenant=%s expired_alerts=%d", tenant_id, n)
+                purged = lifecycle.purge_closed(orion, existing, touched, now)
+                if purged:
+                    logger.info("tenant=%s purged_alerts=%d", tenant_id, purged)
+            except Exception as e:
+                logger.error("Alert lifecycle sweep failed for %s: %s", tenant_id, e)
+                errors += 1
+
+    return {"evaluated": evaluated, "errors": errors}
+
+
+def evaluate_risks_for_tenant(conn, tenant_id: str) -> Dict[str, int]:
+    """Evalúa todos los riesgos activos del catálogo para un tenant (batch)."""
+    return _evaluate_risks(conn, tenant_id)
+
+
+def evaluate_risks_for_parcel(conn, tenant_id: str, parcel_id: str) -> Dict[str, int]:
+    """Evalúa los riesgos del catálogo para UNA parcela (disparado por notificación)."""
+    return _evaluate_risks(conn, tenant_id, parcel_filter=parcel_id, include_crop_stress=False)
+
+
+def main() -> None:
+    """CLI del worker (modo batch): evalúa todos los tenants activos una vez."""
+    from app.db import get_conn
+
+    conn = get_conn()
+    try:
+        with conn.cursor() as cur:
+            cur.execute(
+                "SELECT DISTINCT tenant_id FROM tenants "
+                "WHERE status = 'active' AND tenant_id IS NOT NULL"
+            )
+            tenants = [r["tenant_id"] for r in cur.fetchall()]
+        for tenant_id in tenants:
+            try:
+                result = evaluate_risks_for_tenant(conn, tenant_id)
+                logger.info("tenant=%s result=%s", tenant_id, result)
+            except Exception as e:
+                logger.error("tenant=%s failed: %s", tenant_id, e)
+    finally:
+        conn.close()
+
+
+if __name__ == "__main__":
+    logging.basicConfig(level=logging.INFO)
+    main()
