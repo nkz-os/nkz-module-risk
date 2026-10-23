@@ -305,7 +305,7 @@ def main() -> None:
     try:
         with conn.cursor() as cur:
             cur.execute(
-                "SELECT DISTINCT tenant_id FROM tenants "
+                "SELECT DISTINCT tenant_id FROM module_tenant_plan "
                 "WHERE status = 'active' AND tenant_id IS NOT NULL"
             )
             tenants = [r["tenant_id"] for r in cur.fetchall()]
