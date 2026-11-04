@@ -4,6 +4,7 @@ import logging
 from nkz_platform_sdk import SyncOrionClient
 
 from app.alerts.contract import AlertCategory, AlertSeverity, build_alert_entity
+from app.alerts.plain import action_for, plain_for, urgency_for
 
 logger = logging.getLogger(__name__)
 
@@ -26,6 +27,8 @@ def publish_alert(
     cat = category if isinstance(category, AlertCategory) else AlertCategory(category)
     sev = severity if isinstance(severity, AlertSeverity) else AlertSeverity(severity)
 
+    # El nombre de la parcela no está a mano aquí: id corto (sin lectura extra a Orion).
+    parcel_name = entity_id.rsplit(":", 1)[-1]
     entity = build_alert_entity(
         tenant_id=tenant_id,
         entity_id=entity_id,
@@ -37,6 +40,9 @@ def publish_alert(
         evaluation_data=evaluation_data,
         confidence=confidence,
         context_url=context_url,
+        plain=plain_for(alert_type, cat.value, sev.value, evaluation_data, parcel_name),
+        urgency=urgency_for(cat, sev, alert_type),
+        action=action_for(entity_id, entity_type),
     )
 
     with SyncOrionClient(tenant_id, base_url=orion_ld_url, context_url=context_url) as client:
