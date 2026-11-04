@@ -111,3 +111,35 @@ def test_build_alert_entity_without_plain_is_unchanged():
         alert_type="frost", category=AlertCategory.WEATHER, severity=AlertSeverity.HIGH,
         context_url="http://ctx")
     assert not {"plain", "urgency", "action"} & set(e)
+
+
+@pytest.mark.parametrize("code,es,eu,en", [
+    ("downy_mildew", "mildiu", "mihiu", "downy mildew"),
+    ("powdery_mildew", "oídio", "hauts-izerdia", "powdery mildew"),
+    ("apple_scab", "moteado del manzano", "sagarrondoko zikinkeria", "apple scab"),
+    ("alternaria", "alternaria", "alternaria", "alternaria"),
+    ("botrytis", "botritis", "botritisa", "botrytis"),
+    ("rust_yellow", "roya amarilla", "ñabardura horia", "yellow rust"),
+    ("fire_blight", "fuego bacteriano", "sute bakterianoa", "fire blight"),
+])
+def test_disease_code_is_localized_per_language(code, es, eu, en):
+    p = plain_for("x", "disease", "high", {"disease": code}, "Soto")
+    assert es in p["es"]["title"] and eu in p["eu"]["title"] and en in p["en"]["title"]
+    assert "_" not in str(p)
+
+
+def test_downy_mildew_spanish_title():
+    p = plain_for("downy_mildew", "disease", "high", {"disease": "downy_mildew"}, "Soto")
+    assert p["es"]["title"] == "Riesgo de mildiu en Soto"
+
+
+def test_unknown_code_uses_nameless_variant_in_all_languages():
+    p = plain_for("x", "disease", "high", {"disease": "foo_bar"}, "Soto")
+    assert p == plain_for("x", "disease", "high", None, "Soto")
+    assert "foo" not in str(p)
+
+
+def test_friendly_free_text_passes_through():
+    p = plain_for("x", "disease", "high", {"disease_name": "Roña"}, "Soto")
+    for lang in ("es", "eu", "en"):
+        assert "Roña" in p[lang]["title"]

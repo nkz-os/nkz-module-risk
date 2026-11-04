@@ -1,6 +1,9 @@
 """Test del publicador de Alert (mecanismo Fase 0-1)."""
 from unittest.mock import patch
 
+import pytest
+
+from app.worker import alert_publisher
 from app.worker.alert_publisher import publish_alert
 
 
@@ -67,10 +70,6 @@ def test_publish_alert_adds_plain_urgency_action():
         assert "abc" in entity["plain"]["value"]["es"]["title"]
 
 
-import pytest
-
-from app.worker import alert_publisher
-
 _PID = "urn:ngsi-ld:AgriParcel:abc"
 
 
@@ -81,7 +80,7 @@ def _clear_name_cache():
     alert_publisher._PARCEL_NAMES.clear()
 
 
-def _publish(client_cls, alert_type="frost", entity_id=_PID, entity_type="AgriParcel"):
+def _publish(alert_type="frost", entity_id=_PID, entity_type="AgriParcel"):
     return publish_alert(
         orion_ld_url="http://orion", context_url="http://ctx", tenant_id="acmefarm",
         entity_id=entity_id, entity_type=entity_type,
@@ -94,7 +93,7 @@ def test_parcel_name_used_in_texts():
         inst = M.return_value.__enter__.return_value
         inst.upsert_entities_batch.return_value = {"upserted": 1, "errors": []}
         inst.get_entity.return_value = {"id": _PID, "name": "Soto"}
-        _publish(M)
+        _publish()
         inst.get_entity.assert_called_once_with(_PID, options="keyValues")
         entity = inst.upsert_entities_batch.call_args[0][0][0]
         for lang in ("es", "eu", "en"):
@@ -107,7 +106,7 @@ def test_parcel_name_falls_back_to_short_id(exc):
         inst = M.return_value.__enter__.return_value
         inst.upsert_entities_batch.return_value = {"upserted": 1, "errors": []}
         inst.get_entity.side_effect = exc
-        assert _publish(M) is True
+        assert _publish() is True
         entity = inst.upsert_entities_batch.call_args[0][0][0]
         assert "abc" in entity["plain"]["value"]["es"]["title"]
 
@@ -117,7 +116,7 @@ def test_non_string_name_falls_back():
         inst = M.return_value.__enter__.return_value
         inst.upsert_entities_batch.return_value = {"upserted": 1, "errors": []}
         inst.get_entity.return_value = {"name": {"type": "Property"}}
-        _publish(M)
+        _publish()
         entity = inst.upsert_entities_batch.call_args[0][0][0]
         assert "abc" in entity["plain"]["value"]["es"]["title"]
 
@@ -127,8 +126,8 @@ def test_two_alerts_same_parcel_one_get():
         inst = M.return_value.__enter__.return_value
         inst.upsert_entities_batch.return_value = {"upserted": 1, "errors": []}
         inst.get_entity.return_value = {"name": "Soto"}
-        _publish(M, "frost")
-        _publish(M, "weather_alert")
+        _publish("frost")
+        _publish("weather_alert")
         assert inst.get_entity.call_count == 1
 
 
@@ -136,5 +135,5 @@ def test_non_parcel_entity_no_get():
     with patch("app.worker.alert_publisher.SyncOrionClient") as M:
         inst = M.return_value.__enter__.return_value
         inst.upsert_entities_batch.return_value = {"upserted": 1, "errors": []}
-        _publish(M, entity_id="urn:ngsi-ld:Device:d1", entity_type="Device")
+        _publish(entity_id="urn:ngsi-ld:Device:d1", entity_type="Device")
         inst.get_entity.assert_not_called()

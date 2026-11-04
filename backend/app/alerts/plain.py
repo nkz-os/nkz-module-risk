@@ -87,10 +87,30 @@ def _short(entity_id: str) -> str:
     return entity_id.rsplit(":", 1)[-1] if entity_id else ""
 
 
-def _disease_name(evaluation_data: dict | None) -> str:
+# ASSUMPTION: los nombres eu/en son equivalentes naturales míos; revisar con hablante nativo.
+_DISEASE_NAMES: dict[str, dict[str, str]] = {
+    "downy_mildew": {"es": "mildiu", "eu": "mihiu", "en": "downy mildew"},
+    "powdery_mildew": {"es": "oídio", "eu": "hauts-izerdia", "en": "powdery mildew"},
+    "apple_scab": {"es": "moteado del manzano", "eu": "sagarrondoko zikinkeria", "en": "apple scab"},
+    "alternaria": {"es": "alternaria", "eu": "alternaria", "en": "alternaria"},
+    "botrytis": {"es": "botritis", "eu": "botritisa", "en": "botrytis"},
+    "rust_yellow": {"es": "roya amarilla", "eu": "ñabardura horia", "en": "yellow rust"},
+    "fire_blight": {"es": "fuego bacteriano", "eu": "sute bakterianoa", "en": "fire blight"},
+}
+
+
+def _disease_names(evaluation_data: dict | None) -> dict[str, str] | None:
+    """Nombre por idioma, o None (variante sin nombre) si falta o es un código."""
     data = evaluation_data or {}
-    name = data.get("disease") or data.get("disease_name") or ""
-    return str(name).strip()
+    raw = str(data.get("disease") or data.get("disease_name") or "").strip()
+    if not raw:
+        return None
+    known = _DISEASE_NAMES.get(raw.lower())
+    if known:
+        return known
+    if "_" in raw:
+        return None
+    return {"es": raw, "eu": raw, "en": raw}
 
 
 def _key(alert_type: str, category: str, severity: str, has_disease: bool) -> str:
@@ -108,14 +128,14 @@ def _key(alert_type: str, category: str, severity: str, has_disease: bool) -> st
 
 def plain_for(alert_type, category, severity, evaluation_data, parcel_name) -> dict:
     """Siempre devuelve {es, eu, en}, cada uno con title y body."""
-    disease = _disease_name(evaluation_data)
-    key = _key(_val(alert_type), _val(category), _val(severity), bool(disease))
+    names = _disease_names(evaluation_data)
+    key = _key(_val(alert_type), _val(category), _val(severity), names is not None)
     parcel = (parcel_name or "").strip() or "la parcela"
     out = {}
     for lang, (title, body) in _TEXTS[key].items():
         out[lang] = {
-            "title": title.format(parcel=parcel, disease=disease),
-            "body": body.format(parcel=parcel, disease=disease),
+            "title": title.format(parcel=parcel, disease=(names or {}).get(lang, "")),
+            "body": body.format(parcel=parcel, disease=(names or {}).get(lang, "")),
         }
     return out
 
