@@ -14,7 +14,7 @@ _PARCEL_NAMES: dict[tuple[str, str], str] = {}
 
 def _parcel_name(client, tenant_id: str, entity_id: str, entity_type: str) -> str:
     """Nombre de la parcela (una lectura por parcela); id corto si falla."""
-    short = entity_id.rsplit(":", 1)[-1]
+    short = entity_id.rsplit(":", 1)[-1][:8]
     if entity_type != "AgriParcel":
         return short
     key = (tenant_id, entity_id)

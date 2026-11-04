@@ -36,6 +36,14 @@ def _unwrap_ref(entity: dict) -> str:
     return str(ref or "")
 
 
+def _is_foreign(entity: dict) -> bool:
+    """Alert de otro módulo (`work_*` de crop-health): no es un aviso de riesgo."""
+    at = entity.get("alertType")
+    if isinstance(at, dict):
+        at = at.get("value")
+    return str(at or "").startswith("work_") or ":work_" in str(entity.get("id") or "")
+
+
 def _build_query(category: Optional[str], severity: Optional[str], status: str) -> Optional[str]:
     """Filtro NGSI-LD; por defecto solo las `active` (`status=all` = historial)."""
     q_parts = []
@@ -68,6 +76,7 @@ def get_alerts(
         entities = client.query_entities(type="Alert", q=q, limit=limit)
         parcel_names = _parcel_names(client)
 
+    entities = [e for e in entities if not _is_foreign(e)]
     for e in entities:
         e["refEntityName"] = parcel_names.get(_unwrap_ref(e), "")
     return {"alerts": entities, "count": len(entities)}

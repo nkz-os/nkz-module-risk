@@ -102,13 +102,15 @@ def test_parcel_name_used_in_texts():
 
 @pytest.mark.parametrize("exc", [RuntimeError("404"), ConnectionError("500")])
 def test_parcel_name_falls_back_to_short_id(exc):
+    pid = "urn:ngsi-ld:AgriParcel:abcdefghij"
     with patch("app.worker.alert_publisher.SyncOrionClient") as M:
         inst = M.return_value.__enter__.return_value
         inst.upsert_entities_batch.return_value = {"upserted": 1, "errors": []}
         inst.get_entity.side_effect = exc
-        assert _publish() is True
+        assert _publish(entity_id=pid) is True
         entity = inst.upsert_entities_batch.call_args[0][0][0]
-        assert "abc" in entity["plain"]["value"]["es"]["title"]
+        assert "abcdefgh" in entity["plain"]["value"]["es"]["title"]
+        assert "abcdefghij" not in entity["plain"]["value"]["es"]["title"]
 
 
 def test_non_string_name_falls_back():
