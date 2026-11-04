@@ -8,6 +8,28 @@ from app.alerts.plain import action_for, plain_for, urgency_for
 
 logger = logging.getLogger(__name__)
 
+# (tenant, entity_id) -> nombre de la parcela; solo aciertos, por proceso.
+_PARCEL_NAMES: dict[tuple[str, str], str] = {}
+
+
+def _parcel_name(client, tenant_id: str, entity_id: str, entity_type: str) -> str:
+    """Nombre de la parcela (una lectura por parcela); id corto si falla."""
+    short = entity_id.rsplit(":", 1)[-1]
+    if entity_type != "AgriParcel":
+        return short
+    key = (tenant_id, entity_id)
+    if key in _PARCEL_NAMES:
+        return _PARCEL_NAMES[key]
+    try:
+        name = client.get_entity(entity_id, options="keyValues").get("name")
+    except Exception as exc:  # nunca bloquea la publicación
+        logger.info("Parcel name lookup failed for %s: %s", entity_id, exc)
+        return short
+    if isinstance(name, str) and name.strip():
+        _PARCEL_NAMES[key] = name.strip()
+        return name.strip()
+    return short
+
 
 def publish_alert(
     *,
@@ -27,9 +49,19 @@ def publish_alert(
     cat = category if isinstance(category, AlertCategory) else AlertCategory(category)
     sev = severity if isinstance(severity, AlertSeverity) else AlertSeverity(severity)
 
-    # El nombre de la parcela no está a mano aquí: id corto (sin lectura extra a Orion).
-    parcel_name = entity_id.rsplit(":", 1)[-1]
-    entity = build_alert_entity(
+    with SyncOrionClient(tenant_id, base_url=orion_ld_url, context_url=context_url) as client:
+        parcel_name = _parcel_name(client, tenant_id, entity_id, entity_type)
+        entity = _build(
+            tenant_id, entity_id, entity_type, alert_type, cat, sev,
+            probability_score, evaluation_data, confidence, context_url, parcel_name,
+        )
+        result = client.upsert_entities_batch([entity])
+    return _finish(result, alert_type, entity_id)
+
+
+def _build(tenant_id, entity_id, entity_type, alert_type, cat, sev,
+           probability_score, evaluation_data, confidence, context_url, parcel_name):
+    return build_alert_entity(
         tenant_id=tenant_id,
         entity_id=entity_id,
         entity_type=entity_type,
@@ -45,8 +77,8 @@ def publish_alert(
         action=action_for(entity_id, entity_type),
     )
 
-    with SyncOrionClient(tenant_id, base_url=orion_ld_url, context_url=context_url) as client:
-        result = client.upsert_entities_batch([entity])
+
+def _finish(result, alert_type, entity_id) -> bool:
     ok = bool(result and result.get("upserted", 0) >= 1)
     if not ok:
         logger.warning(
