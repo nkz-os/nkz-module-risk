@@ -90,6 +90,11 @@ def load_existing(orion) -> Dict[str, Dict[str, Any]]:
         offset += _PAGE
 
 
+def is_foreign(alert_id: str, alert_type: Optional[str]) -> bool:
+    """Alert de otro módulo (p. ej. los `work_*` de crop-health) en el mismo pool."""
+    return ":work_" in (alert_id or "") or str(alert_type or "").startswith("work_")
+
+
 def _iso(now: datetime) -> str:
     return now.astimezone(timezone.utc).isoformat().replace("+00:00", "Z")
 
@@ -114,6 +119,8 @@ def sweep_expired(
     for alert_id, info in existing.items():
         if info["status"] != "active" or alert_id in touched:
             continue
+        if is_foreign(alert_id, info.get("alert_type")):
+            continue
         ttl = ttl_hours(info["category"], catalog_config.get(info["alert_type"] or ""))
         if is_expired(info["observed_at"], ttl, now):
             mark(orion, alert_id, "expired", now)
@@ -136,6 +143,8 @@ def purge_closed(
     purged = 0
     for alert_id, info in existing.items():
         if info["status"] == "active" or alert_id in touched:
+            continue
+        if is_foreign(alert_id, info.get("alert_type")):
             continue
         if is_expired(info.get("state_at"), max_age_days * 24, now):
             orion.delete_entity(alert_id)

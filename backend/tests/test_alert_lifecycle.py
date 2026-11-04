@@ -141,3 +141,19 @@ def test_purge_deletes_only_old_closed_alerts():
     # Una descartada cuya condición sigue no se borra: el worker la reabriría.
     assert deleted == {"old_resolved", "old_dismissed"}
     assert n == 2
+
+
+def test_sweep_and_purge_leave_foreign_work_alerts_alone():
+    old = (NOW - timedelta(days=200)).isoformat().replace("+00:00", "Z")
+    existing = {
+        "urn:ngsi-ld:Alert:acmefarm:work_sow:abc12345:2026-11-04": {
+            "status": "active", "category": "operations", "alert_type": "work_sow", "observed_at": old},
+        "urn:ngsi-ld:Alert:acmefarm:x:y": {
+            "status": "expired", "category": None, "alert_type": "work_irrigate", "state_at": old},
+        "mine": {"status": "active", "category": "pest", "alert_type": "gdd_pest", "observed_at": old},
+    }
+    orion = MagicMock()
+    assert lc.sweep_expired(orion, existing, touched=set(), catalog_config={}, now=NOW) == 1
+    assert orion.append_entity_attrs.call_args[0][0] == "mine"
+    assert lc.purge_closed(orion, existing, touched=set(), now=NOW) == 0
+    orion.delete_entity.assert_not_called()

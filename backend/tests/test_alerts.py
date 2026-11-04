@@ -33,3 +33,21 @@ def test_alert_query_all_statuses():
     from app.api.alerts import _build_query
     assert _build_query(None, None, "all") is None
     assert _build_query(None, None, "dismissed") == 'status=="dismissed"'
+
+
+def test_alerts_listing_excludes_work_alerts():
+    from unittest.mock import patch
+    from app.api import alerts as api
+
+    pool = [
+        {"id": "urn:ngsi-ld:Alert:acmefarm:frost:p1", "alertType": {"type": "Property", "value": "frost"}},
+        {"id": "urn:ngsi-ld:Alert:acmefarm:work_irrigate:abc12345:2026-11-04",
+         "alertType": {"type": "Property", "value": "work_irrigate"}},
+        {"id": "urn:ngsi-ld:Alert:acmefarm:work_sow:abc12345:2026-11-04"},
+    ]
+    with patch.object(api, "SyncOrionClient") as M:
+        inst = M.return_value.__enter__.return_value
+        inst.query_entities.side_effect = lambda **kw: list(pool) if kw.get("type") == "Alert" else []
+        out = api.get_alerts(tenant_id="acmefarm", category=None, severity=None, status="active", limit=200)
+    assert [e["id"] for e in out["alerts"]] == ["urn:ngsi-ld:Alert:acmefarm:frost:p1"]
+    assert out["count"] == 1

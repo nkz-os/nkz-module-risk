@@ -40,7 +40,8 @@ def _now() -> str:
 
 def build_alert_entity(*, tenant_id, entity_id, entity_type, alert_type,
                        category, severity, probability_score=None,
-                       evaluation_data=None, confidence=1.0, context_url) -> dict:
+                       evaluation_data=None, confidence=1.0, context_url,
+                       plain=None, urgency=None, action=None) -> dict:
     e = {
         "@context": context_url,
         "id": alert_entity_id(tenant_id, alert_type, entity_id),
@@ -57,4 +58,7 @@ def build_alert_entity(*, tenant_id, entity_id, entity_type, alert_type,
     }
     if probability_score is not None:
         e["probabilityScore"] = {"type": "Property", "value": probability_score}
+    for name, value in (("plain", plain), ("urgency", urgency), ("action", action)):
+        if value is not None:
+            e[name] = {"type": "Property", "value": value}
     return e
