@@ -5,7 +5,17 @@ from app.worker import frost_spell as fs
 from app.worker.frost_spell import FrostConfig, Night, SpellState
 
 TODAY = date(2026, 12, 10)
-CFG = FrostConfig(((4, 3.5), (5, 4.0), (7, 4.5)), near_nights=4, horizon_nights=7)
+APPROVED = {
+    "thresholds_by_lead": [
+        {"max_lead": 4, "tmin_c": 3.5},
+        {"max_lead": 5, "tmin_c": 4.0},
+        {"max_lead": 7, "tmin_c": 4.5},
+    ],
+    "near_nights": 4,
+    "horizon_nights": 7,
+}
+# Misma forma que el catálogo: así un cambio de formato no queda oculto por el fixture.
+CFG = fs.config_from_model_config(APPROVED)
 WARM = 10.0
 
 
@@ -66,18 +76,20 @@ def test_far_becoming_near_vibrates():
 
 
 def test_gap_of_three_nights_opens_new_spell_and_vibrates():
-    prev = SpellState(TODAY, TODAY, True, True, "severe")
-    d = _decide({3: 1.0}, prev=prev)  # primera en riesgo = last + 3
+    last = TODAY - timedelta(days=1)  # ya pasó
+    prev = SpellState(last, last, True, True, "severe")
+    d = _decide({2: 1.0}, prev=prev)  # primera en riesgo = last + 3
     assert d.new_spell and d.vibrate
-    assert d.spell.start == TODAY + timedelta(days=3)
+    assert d.spell.start == TODAY + timedelta(days=2)
     assert not d.spell.severe_vibrated
 
 
 def test_gap_of_two_nights_keeps_spell():
-    prev = SpellState(TODAY, TODAY, True, True, "severe")
-    d = _decide({2: 1.0}, prev=prev)  # last + 2
+    last = TODAY - timedelta(days=1)
+    prev = SpellState(last, last, True, True, "severe")
+    d = _decide({1: 1.0}, prev=prev)  # last + 2
     assert not d.new_spell and not d.vibrate
-    assert d.spell.start == TODAY and d.spell.last_night == TODAY + timedelta(days=2)
+    assert d.spell.start == last and d.spell.last_night == TODAY + timedelta(days=1)
 
 
 def test_withdrawn_forecast_keeps_state_and_no_risk_is_none():
@@ -167,9 +179,100 @@ def test_config_missing_thresholds_returns_none():
     assert fs.config_from_model_config({"thresholds_by_lead": [[4, 3.5]], "horizon_nights": 7}) is None
 
 
-def test_config_parses_values():
+def test_config_malformed_rows_return_none_not_raise():
+    base = {"near_nights": 4, "horizon_nights": 7}
+    for bad in (
+        [{"max_lead": 4}],
+        [{"tmin_c": 3.5}],
+        [{"max_lead": "x", "tmin_c": 3.5}],
+        [{"max_lead": 4, "tmin_c": None}],
+        [{"max_lead": 4, "tmin_c": float("nan")}],
+        [5],
+        "abc",
+        [None],
+    ):
+        assert fs.config_from_model_config({**base, "thresholds_by_lead": bad}) is None
+
+
+def test_config_parses_approved_catalog_json():
     cfg = fs.config_from_model_config(
-        {"thresholds_by_lead": [[7, 4.5], [4, 3.5], [5, 4.0]], "near_nights": 4,
-         "horizon_nights": 7, "severe_threshold": -5.0}
+        {
+            "thresholds_by_lead": [
+                {"max_lead": 4, "tmin_c": 3.5},
+                {"max_lead": 5, "tmin_c": 4.0},
+                {"max_lead": 7, "tmin_c": 4.5},
+            ],
+            "near_nights": 4,
+            "horizon_nights": 7,
+        }
+    )
+    assert cfg == FrostConfig(((4, 3.5), (5, 4.0), (7, 4.5)), near_nights=4, horizon_nights=7)
+    # De punta a punta con esa configuración.
+    d = fs.decide_frost(_nights({2: 1.0}), None, cfg, TODAY, False)
+    assert d.stage == "near" and d.vibrate and d.severity == "high"
+
+
+def test_config_accepts_pairs():
+    cfg = fs.config_from_model_config(
+        {"thresholds_by_lead": [[7, 4.5], [4, 3.5], [5, 4.0]], "near_nights": 4, "horizon_nights": 7}
     )
     assert cfg == CFG
+
+
+def test_flapping_near_night_does_not_vibrate_twice():
+    prev, out = None, []
+    for ov in ({1: 1.0, 6: 3.0}, {6: 3.0}, {1: 1.0, 6: 3.0}):
+        d = _decide(ov, prev=prev)
+        out.append(d.vibrate)
+        prev = d.spell
+    assert out == [True, False, False]
+
+
+def test_new_spell_vibrates_once_previous_last_night_has_passed():
+    first = _decide({1: 1.0})
+    assert first.vibrate
+    later = TODAY + timedelta(days=2)  # la noche de la racha ya pasó
+    nights = [Night(later + timedelta(days=i), WARM if i != 2 else 1.0, "forecast") for i in range(0, 8)]
+    d = fs.decide_frost(nights, first.spell, CFG, later, False)
+    assert d.new_spell and d.vibrate and d.stage == "near"
+    again = fs.decide_frost(nights, d.spell, CFG, later, False)
+    assert not again.vibrate
+    # Helada retirada y otra posterior más cercana después: sigue avisando.
+    withdrawn = fs.decide_frost(_nights(), first.spell, CFG, later, False)
+    assert withdrawn.stage == "none" and withdrawn.spell == first.spell
+    much_later = TODAY + timedelta(days=9)
+    nights2 = [Night(much_later + timedelta(days=i), 1.0 if i == 1 else WARM, "forecast") for i in range(0, 8)]
+    d2 = fs.decide_frost(nights2, withdrawn.spell, CFG, much_later, False)
+    assert d2.new_spell and d2.vibrate
+
+
+def test_running_night_counts_for_chain_but_does_not_trigger():
+    # Racha previa terminó en D-2; D-1 limpia; D (en curso) fría; D+1 fría: misma racha.
+    prev = SpellState(TODAY - timedelta(days=4), TODAY - timedelta(days=2), True, False, "near")
+    d = fs.decide_frost(_nights({1: 1.0}, running=1.0), prev, CFG, TODAY, False)
+    assert not d.new_spell and not d.vibrate and d.stage == "near"
+    # Solo la noche en curso fría: ni escalón ni vibración.
+    only = fs.decide_frost(_nights(running=-8.0), prev, CFG, TODAY, False)
+    assert only.stage == "none" and not only.vibrate and only.spell == prev
+
+
+def test_duplicate_nights_colder_wins_in_any_order():
+    cold = Night(TODAY + timedelta(days=1), 1.0, "forecast")
+    warm = Night(TODAY + timedelta(days=1), WARM, "forecast")
+    rest = [n for n in _nights() if (n.day - TODAY).days != 1]
+    for order in ([cold, warm], [warm, cold]):
+        d = fs.decide_frost(rest + order, None, CFG, TODAY, False)
+        assert d.stage == "near" and d.vibrate
+
+
+def test_duplicate_null_never_overrides_value():
+    val = Night(TODAY + timedelta(days=1), 1.0, "forecast")
+    nul = Night(TODAY + timedelta(days=1), None, "forecast")
+    rest = [n for n in _nights() if (n.day - TODAY).days != 1]
+    for order in ([val, nul], [nul, val]):
+        d = fs.decide_frost(rest + order, None, CFG, TODAY, False)
+        assert not d.no_data and d.stage == "near"
+
+
+def test_nan_tmin_in_near_window_is_no_data():
+    assert _decide({2: float("nan")}).no_data

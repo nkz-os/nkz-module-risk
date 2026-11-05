@@ -5,6 +5,7 @@ Sin E/S ni registro. El worker aporta las noches (mínima prevista del día loca
 """
 from __future__ import annotations
 
+import math
 from dataclasses import dataclass
 from datetime import date, timedelta
 from typing import Optional
@@ -59,17 +60,29 @@ class FrostDecision:
 def config_from_model_config(model_config: dict) -> Optional[FrostConfig]:
     """Lee la configuración de helada; sin tabla de umbrales, antelación o horizonte, None.
 
-    Claves: thresholds_by_lead [[noches, grados], ...], near_nights, horizon_nights,
-    y opcionales moderate_threshold, severe_threshold, gap_nights.
+    Claves: thresholds_by_lead [{"max_lead": noches, "tmin_c": grados}, ...] (también
+    se aceptan pares [noches, grados]), near_nights, horizon_nights, y opcionales moderate_threshold, severe_threshold, gap_nights.
     No hay valores por defecto para los umbrales: sin tabla no hay aviso anticipado.
     """
     if not isinstance(model_config, dict):
         return None
     try:
         raw = model_config.get("thresholds_by_lead")
-        if not raw:
+        if not raw or not isinstance(raw, (list, tuple)):
             return None
-        rows = tuple(sorted((int(r[0]), float(r[1])) for r in raw))
+        parsed = []
+        for r in raw:
+            if isinstance(r, dict):
+                lead, thr = r["max_lead"], r["tmin_c"]
+            else:
+                lead, thr = r[0], r[1]
+            if isinstance(lead, bool) or isinstance(thr, bool):
+                return None
+            lead, thr = int(lead), float(thr)
+            if not math.isfinite(thr):
+                return None
+            parsed.append((lead, thr))
+        rows = tuple(sorted(parsed))
         near = int(model_config["near_nights"])
         horizon = int(model_config["horizon_nights"])
         moderate = float(model_config.get("moderate_threshold", -2.0))
@@ -94,6 +107,13 @@ def should_reopen_dismissed(dismissed_stage: str, stage: str) -> bool:
     return _STAGE_RANK.get(stage, 0) > _STAGE_RANK.get(dismissed_stage, 0)
 
 
+def _finite(v: Optional[float]) -> Optional[float]:
+    """Un nulo o un valor no finito (NaN, inf) cuenta como sin dato."""
+    if v is None or not math.isfinite(v):
+        return None
+    return v
+
+
 def _no_data(prev: Optional[SpellState]) -> FrostDecision:
     return FrostDecision(True, STAGE_NONE, None, False, None, None, (), prev, False)
 
@@ -107,19 +127,28 @@ def decide_frost(
 ) -> FrostDecision:
     by_lead: dict[int, Night] = {}
     for n in nights:
-        by_lead[(n.day - today).days] = n
+        lead = (n.day - today).days
+        cur = by_lead.get(lead)
+        if cur is None:
+            by_lead[lead] = n
+            continue
+        # Duplicados: gana el valor más frío; un nulo nunca pisa un valor.
+        if _finite(cur.tmin_c) is None or (
+            _finite(n.tmin_c) is not None and n.tmin_c < cur.tmin_c
+        ):
+            by_lead[lead] = n
 
     # Una evaluación incompleta nunca resuelve ni degrada: sin dato.
     for lead in range(1, cfg.near_nights + 1):
         n = by_lead.get(lead)
-        if n is None or n.tmin_c is None:
+        if n is None or _finite(n.tmin_c) is None:
             return _no_data(prev)
 
     at_risk_list: list[Night] = []
     severe_hit = False
     for lead in sorted(by_lead):
         n = by_lead[lead]
-        if lead < 1 or lead > cfg.horizon_nights or n.tmin_c is None:
+        if lead < 1 or lead > cfg.horizon_nights or _finite(n.tmin_c) is None:
             continue
         thr = _threshold_for_lead(cfg, lead)
         if thr is not None and n.tmin_c <= thr:
@@ -128,6 +157,18 @@ def decide_frost(
             severe_hit = True
     at_risk_list.sort(key=lambda n: n.day)
     at_risk = tuple(at_risk_list)
+
+    # La noche en curso (lead 0) solo cuenta para la cadena, con el umbral de la
+    # primera fila; nunca dispara escalón ni vibración.
+    chain_nights = list(at_risk_list)
+    running = by_lead.get(0)
+    if (
+        running is not None
+        and _finite(running.tmin_c) is not None
+        and cfg.thresholds_by_lead
+        and running.tmin_c <= cfg.thresholds_by_lead[0][1]
+    ):
+        chain_nights.insert(0, running)
 
     near_hit = any((n.day - today).days <= cfg.near_nights for n in at_risk)
     if severe_hit:
@@ -150,11 +191,15 @@ def decide_frost(
     else:
         severity = "medium" if coldest.tmin_c <= 0.0 else "low"
 
-    first = at_risk[0].day
-    new_spell = prev is None or first > prev.last_night + timedelta(days=cfg.gap_nights)
+    first = chain_nights[0].day
+    # Racha nueva solo si la anterior ya pasó: mientras su última noche no ha
+    # pasado, una noche lejana no la sustituye (evita doble vibración por oscilación).
+    new_spell = prev is None or (
+        first > prev.last_night + timedelta(days=cfg.gap_nights) and prev.last_night < today
+    )
 
     chain_end = first
-    for n in at_risk[1:]:
+    for n in chain_nights[1:]:
         if (n.day - chain_end).days <= cfg.gap_nights:
             chain_end = n.day
         else:
