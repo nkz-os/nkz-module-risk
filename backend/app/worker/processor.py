@@ -38,8 +38,21 @@ def _get_catalog(conn) -> List[Dict[str, Any]]:
         return [dict(r) for r in cur.fetchall()]
 
 
+def _frost_first(catalog: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """La helada, antes que el resto: los demás modelos no deben comerse su pasada."""
+    return sorted(catalog, key=lambda r: r.get("model_type") != "frost")
+
+
 def _get_entities(orion: SyncOrionClient, entity_type: str) -> List[Dict[str, Any]]:
-    return orion.query_entities(type=entity_type, limit=200)
+    """Todas las entidades del tipo. Sin paginar, las más nuevas se perderían en silencio."""
+    out: List[Dict[str, Any]] = []
+    offset = 0
+    while True:
+        page = orion.query_entities(type=entity_type, limit=lifecycle._PAGE, offset=offset) or []
+        out.extend(page)
+        if len(page) < lifecycle._PAGE:
+            return out
+        offset += lifecycle._PAGE
 
 
 def _parcel_crop_group(orion: SyncOrionClient, entity: Dict[str, Any]) -> str | None:
@@ -178,6 +191,7 @@ def _evaluate_frost_risk(
 ) -> Dict[str, int]:
     """Aviso de helada por noche: una evaluación por parcela, aislada de las demás."""
     counts = {"evaluated": 0, "errors": 0, "frost_no_data": 0}
+    breaker = frost_alerts.FrostBreaker()
     for entity in _get_entities(orion, risk["target_sdm_type"]):
         entity_id = entity.get("id")
         if not entity_id or (parcel_filter and entity_id != parcel_filter):
@@ -187,7 +201,7 @@ def _evaluate_frost_risk(
             continue
         try:
             outcome = frost_alerts.process_frost_parcel(
-                orion, conn, settings, tenant_id, risk, entity, existing, touched, now
+                orion, conn, settings, tenant_id, risk, entity, existing, touched, now, breaker
             )
         except Exception as e:
             logger.error("frost eval tenant=%s parcel_id=%s: %s", tenant_id, entity_id, e)
@@ -197,6 +211,11 @@ def _evaluate_frost_risk(
             counts["evaluated"] += 1
         elif outcome == frost_alerts.NO_DATA:
             counts["frost_no_data"] += 1
+    if breaker.skipped:
+        logger.error(
+            "frost no_data tenant=%s reason=%s skipped=%d",
+            tenant_id, frost_alerts.REASON_BREAKER_OPEN, breaker.skipped,
+        )
     return counts
 
 
@@ -215,7 +234,7 @@ def _evaluate_risks(
     settings = get_settings()
     catalog = _get_catalog(conn)
     if not catalog:
-        return {"evaluated": 0, "errors": 0}
+        return {"evaluated": 0, "errors": 0, "frost_no_data": 0}
 
     evaluated = errors = frost_no_data = 0
     now = datetime.now(timezone.utc)
@@ -229,7 +248,7 @@ def _evaluate_risks(
             logger.error("Alert lifecycle: no se pudo leer el estado previo (%s); se omite el tenant", e)
             return {"evaluated": 0, "errors": 1, "frost_no_data": 0}
 
-        for risk in catalog:
+        for risk in _frost_first(catalog):
             if risk.get("model_type") == "frost":
                 fc = _evaluate_frost_risk(
                     orion, conn, settings, tenant_id, risk, existing, touched, now, parcel_filter

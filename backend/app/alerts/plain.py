@@ -91,6 +91,11 @@ _FROST_TITLE = {
     "en": "Possible frost in {parcel}",
 }
 _FROST_BODY = {
+    "frost_dawn": {
+        "es": "Esta madrugada puede bajar a {tmin} °C.",
+        "eu": "Gaur goizaldean {tmin} °C-ra jaitsi daiteke.",
+        "en": "Early this morning it may drop to {tmin} °C.",
+    },
     "frost_tonight": {
         "es": "Esta noche puede bajar a {tmin} °C.",
         "eu": "Gaur gauean {tmin} °C-ra jaitsi daiteke.",
@@ -110,8 +115,26 @@ _WEEKDAYS = {
 }
 
 
+# Antes de esta hora local, «esta noche» se leería como la noche que aún está en curso.
+_TONIGHT_FROM_HOUR = 6
+
+
+def round_tmin(tmin: float) -> int:
+    """Mínima tal y como la lee el agricultor: grados enteros, .5 hacia arriba."""
+    return int(math.floor(float(tmin) + 0.5))
+
+
+def frost_body_key(lead: int, local_hour: int | None) -> str:
+    """Forma del texto. Sin hora conocida, la fechada, que nunca dice «esta noche» en falso."""
+    if lead == 0:
+        return "frost_dawn"
+    if lead == 1 and local_hour is not None and local_hour >= _TONIGHT_FROM_HOUR:
+        return "frost_tonight"
+    return "frost_night"
+
+
 def _frost_night_info(evaluation_data: dict | None):
-    """(día D de la noche, antelación, mínima redondeada) o None si falta algo."""
+    """(día D de la noche, antelación, mínima redondeada, hora local) o None si falta algo."""
     data = evaluation_data or {}
     try:
         # text_*: la noche que nombra el texto (a escalón severo, la severa).
@@ -121,15 +144,16 @@ def _frost_night_info(evaluation_data: dict | None):
         tmin = data[f"{pre}_tmin_c"]
         if isinstance(tmin, bool) or not math.isfinite(float(tmin)):
             return None
-        return night, lead, int(math.floor(float(tmin) + 0.5))
+        hour = data.get("local_hour")
+        return night, lead, round_tmin(tmin), hour if isinstance(hour, int) else None
     except (KeyError, TypeError, ValueError):
         return None
 
 
 def _frost_plain(parcel: str, info) -> dict:
-    night, lead, tmin = info
+    night, lead, tmin, hour = info
     start = night - timedelta(days=1)  # la noche empieza el día anterior a D
-    key = "frost_tonight" if lead == 1 else "frost_night"
+    key = frost_body_key(lead, hour)
     out = {}
     for lang, title in _FROST_TITLE.items():
         out[lang] = {

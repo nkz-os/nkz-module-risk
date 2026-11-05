@@ -1,7 +1,7 @@
 """Decisión pura del aviso de helada: noches, escalones por antelación y racha de frío.
 
 Sin E/S ni registro. El worker aporta las noches (mínima prevista del día local D
-= noche de D-1 a D), el estado previo de la racha y la fecha local de hoy.
+= noche de D-1 a D), el estado previo de la racha, y la fecha y la hora locales.
 """
 from __future__ import annotations
 
@@ -16,6 +16,22 @@ STAGE_NEAR = "near"
 STAGE_SEVERE = "severe"
 
 _STAGE_RANK = {STAGE_NONE: 0, STAGE_FAR: 1, STAGE_NEAR: 2, STAGE_SEVERE: 3}
+
+URGENCY_VIBRATE = "vibrate"
+URGENCY_SILENT = "silent"
+
+REASON_INCOMPLETE = "incomplete_nights"
+REASON_PARTIAL = "partial"
+
+# La mínima de la noche en curso cae al amanecer: hasta esta hora local esa noche sigue viva.
+RUNNING_NIGHT_UNTIL_HOUR = 10
+
+# Horas de silencio, en hora local. El owner puede cambiarlas.
+QUIET_START = 22
+QUIET_END = 8
+# Dentro de las horas de silencio solo vibra lo inminente: la noche en curso, o la de
+# mañana (lead 1) a partir de esta hora.
+IMMINENT_LEAD_1_FROM_HOUR = 18
 
 
 @dataclass(frozen=True)
@@ -55,6 +71,9 @@ class FrostDecision:
     at_risk: tuple[Night, ...]
     spell: Optional[SpellState]
     new_spell: bool
+    no_data_reason: Optional[str] = None
+    text_night: Optional[Night] = None  # la noche que nombra el texto del aviso
+    text_lead: Optional[int] = None
 
 
 def config_from_model_config(model_config: dict) -> Optional[FrostConfig]:
@@ -114,8 +133,35 @@ def _finite(v: Optional[float]) -> Optional[float]:
     return v
 
 
-def _no_data(prev: Optional[SpellState]) -> FrostDecision:
-    return FrostDecision(True, STAGE_NONE, None, False, None, None, (), prev, False)
+def _no_data(prev: Optional[SpellState], reason: str) -> FrostDecision:
+    return FrostDecision(True, STAGE_NONE, None, False, None, None, (), prev, False, reason)
+
+
+def _text_night(at_risk: tuple[Night, ...], stage: str, cfg: FrostConfig, today: date) -> Night:
+    """Noche que nombra el texto: a escalón severo, la primera noche severa cercana."""
+    if stage == STAGE_SEVERE:
+        for n in at_risk:
+            if (n.day - today).days <= cfg.near_nights and n.tmin_c <= cfg.severe_c:
+                return n
+    return at_risk[0]
+
+
+def frost_urgency(decision: FrostDecision, muted: bool, local_hour: int) -> str:
+    """`vibrate` mientras el aviso sea cercano o severo; el resto, `silent`.
+
+    Se repite en cada publicación: notifications deduplica por (id, severidad) y solo
+    anota lo enviado, así que reintenta un push fallido y no vuelve a vibrar tras el
+    éxito. La entrega no depende de `decision.vibrate`, que es contabilidad de la racha.
+    """
+    if muted or decision.stage not in (STAGE_NEAR, STAGE_SEVERE):
+        return URGENCY_SILENT
+    quiet = local_hour >= QUIET_START or local_hour < QUIET_END
+    if not quiet:
+        return URGENCY_VIBRATE
+    imminent = decision.text_lead == 0 or (
+        decision.text_lead == 1 and local_hour >= IMMINENT_LEAD_1_FROM_HOUR
+    )
+    return URGENCY_VIBRATE if imminent else URGENCY_SILENT
 
 
 def decide_frost(
@@ -124,6 +170,7 @@ def decide_frost(
     cfg: FrostConfig,
     today: date,
     muted: bool,
+    local_hour: int,
 ) -> FrostDecision:
     by_lead: dict[int, Night] = {}
     for n in nights:
@@ -138,17 +185,22 @@ def decide_frost(
         ):
             by_lead[lead] = n
 
-    # Una evaluación incompleta nunca resuelve ni degrada: sin dato.
-    for lead in range(1, cfg.near_nights + 1):
+    # La noche en curso dispara hasta RUNNING_NIGHT_UNTIL_HOUR: su mínima aún no ha caído.
+    first_trigger = 0 if local_hour < RUNNING_NIGHT_UNTIL_HOUR else 1
+
+    def missing(lead: int) -> bool:
         n = by_lead.get(lead)
-        if n is None or _finite(n.tmin_c) is None:
-            return _no_data(prev)
+        return n is None or _finite(n.tmin_c) is None
+
+    # Una evaluación incompleta nunca resuelve ni degrada: sin dato.
+    if any(missing(lead) for lead in range(first_trigger, cfg.near_nights + 1)):
+        return _no_data(prev, REASON_INCOMPLETE)
 
     at_risk_list: list[Night] = []
     severe_hit = False
     for lead in sorted(by_lead):
         n = by_lead[lead]
-        if lead < 1 or lead > cfg.horizon_nights or _finite(n.tmin_c) is None:
+        if lead < first_trigger or lead > cfg.horizon_nights or _finite(n.tmin_c) is None:
             continue
         thr = _threshold_for_lead(cfg, lead)
         if thr is not None and n.tmin_c <= thr:
@@ -158,12 +210,13 @@ def decide_frost(
     at_risk_list.sort(key=lambda n: n.day)
     at_risk = tuple(at_risk_list)
 
-    # La noche en curso (lead 0) solo cuenta para la cadena, con el umbral de la
-    # primera fila; nunca dispara escalón ni vibración.
+    # Pasada esa hora, la noche en curso (lead 0) solo cuenta para la cadena, con el
+    # umbral de la primera fila; ya no dispara escalón ni vibración.
     chain_nights = list(at_risk_list)
     running = by_lead.get(0)
     if (
-        running is not None
+        first_trigger == 1
+        and running is not None
         and _finite(running.tmin_c) is not None
         and cfg.thresholds_by_lead
         and running.tmin_c <= cfg.thresholds_by_lead[0][1]
@@ -181,6 +234,9 @@ def decide_frost(
         stage = STAGE_NONE
 
     if not at_risk:
+        # Solo una evaluación completa puede resolver: una noche sin dato podría ser la fría.
+        if any(missing(lead) for lead in range(first_trigger, cfg.horizon_nights + 1)):
+            return _no_data(prev, REASON_PARTIAL)
         return FrostDecision(False, STAGE_NONE, None, False, None, None, (), prev, False)
 
     coldest = min(at_risk, key=lambda n: n.tmin_c)
@@ -255,4 +311,8 @@ def decide_frost(
         severe_vibrated=was_severe or stage == STAGE_SEVERE,
         stage=stage,
     )
-    return FrostDecision(False, stage, severity, vibrate, at_risk[0], coldest, at_risk, spell, new_spell)
+    text = _text_night(at_risk, stage, cfg, today)
+    return FrostDecision(
+        False, stage, severity, vibrate, at_risk[0], coldest, at_risk, spell, new_spell,
+        text_night=text, text_lead=(text.day - today).days,
+    )

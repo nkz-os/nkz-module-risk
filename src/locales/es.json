@@ -64,7 +64,7 @@
     "title": "Avisos de la parcela",
     "empty": "Sin avisos para esta entidad",
     "frostVibrate": "Vibrar el móvil con avisos de helada",
-    "frostVibrateHelp": "Si lo desactivas, el móvil deja de vibrar por heladas en esta parcela. El aviso sigue apareciendo en la app.",
+    "frostVibrateHelp": "Si lo desactivas, dejas de recibir el aviso inmediato de helada de esta parcela. El aviso sigue en la app y en el resumen diario.",
     "frostVibrateError": "No se pudo leer o guardar el ajuste"
   },
   "widget": {

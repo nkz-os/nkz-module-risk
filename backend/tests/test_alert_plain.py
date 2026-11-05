@@ -145,8 +145,8 @@ def test_friendly_free_text_passes_through():
         assert "Roña" in p[lang]["title"]
 
 
-def _frost_data(night, lead, tmin):
-    return {"next_night": night, "next_lead": lead, "next_tmin_c": tmin}
+def _frost_data(night, lead, tmin, hour=12):
+    return {"next_night": night, "next_lead": lead, "next_tmin_c": tmin, "local_hour": hour}
 
 
 def test_frost_plain_tonight_and_dated_in_three_languages():
@@ -173,3 +173,25 @@ def test_frost_plain_has_no_model_names_or_thresholds():
 
 def test_frost_plain_without_night_data_keeps_previous_text():
     assert plain_for("frost", "agronomic", "high", None, "Soto")["es"]["title"] == "Helada prevista en Soto"
+
+
+def test_frost_plain_lead_zero_is_this_dawn():
+    p = plain_for("frost", "agronomic", "high", _frost_data("2026-11-05", 0, 1.4, hour=3), "Soto")
+    assert p["es"]["body"] == "Esta madrugada puede bajar a 1 °C."
+    assert p["en"]["body"] == "Early this morning it may drop to 1 °C."
+    assert p["eu"]["body"] == "Gaur goizaldean 1 °C-ra jaitsi daiteke."
+
+
+def test_frost_plain_lead_one_before_six_is_dated():
+    # A las 02:00 «esta noche» se leería como la que ya está en curso.
+    p = plain_for("frost", "agronomic", "high", _frost_data("2026-11-06", 1, 1.4, hour=2), "Soto")
+    assert p["es"]["body"] == "Noche del jueves 05/11: puede bajar a 1 °C."
+    assert p["en"]["body"] == "Night of Thursday 05/11: it may drop to 1 °C."
+    assert p["eu"]["body"] == "osteguna 05/11 gaua: 1 °C-ra jaitsi daiteke."
+    at_six = plain_for("frost", "agronomic", "high", _frost_data("2026-11-06", 1, 1.4, hour=6), "Soto")
+    assert at_six["es"]["body"] == "Esta noche puede bajar a 1 °C."
+
+
+def test_frost_plain_lead_one_without_hour_is_dated():
+    data = {"next_night": "2026-11-06", "next_lead": 1, "next_tmin_c": 1.4}
+    assert plain_for("frost", "agronomic", "high", data, "Soto")["es"]["body"].startswith("Noche del")

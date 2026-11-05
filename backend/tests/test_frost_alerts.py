@@ -1,9 +1,11 @@
 """Aviso de helada por noche: fuente /daily, estado de la racha y ciclo de vida."""
+import json
 import logging
 from datetime import date, datetime, timedelta, timezone
 from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from app.worker import alert_lifecycle as lc
 from app.worker import frost_alerts as fa
@@ -37,8 +39,8 @@ def nights(overrides=None, upto=7):
     return out
 
 
-def fetched(overrides=None, upto=7):
-    return sources.FrostNights(nights(overrides, upto), TODAY, "2026-11-05T06:00:00Z")
+def fetched(overrides=None, upto=7, hour=12):
+    return sources.FrostNights(nights(overrides, upto), TODAY, "2026-11-05T06:00:00Z", hour)
 
 
 def conn_with(row=None, fail=False):
@@ -93,7 +95,8 @@ def _resp(body, status=200):
 
 
 DAILY = {
-    "local_today": "2026-11-05", "forecast_issued_at": "2026-11-05T06:00:00Z",
+    "local_today": "2026-11-05", "local_now": "2026-11-05T07:30",
+    "forecast_issued_at": "2026-11-05T06:00:00Z",
     "days": [
         {"date": "2026-11-04", "kind": "closed", "tmin_c": 7.0, "tmin_coldest_c": 1.0},
         {"date": "2026-11-05", "kind": "running", "tmin_c": 6.0, "tmin_coldest_c": 4.0},
@@ -103,7 +106,7 @@ DAILY = {
 }
 
 
-def test_fetch_nights_signs_request_and_asks_two_past_days(monkeypatch):
+def test_fetch_nights_signs_request_and_asks_no_fill(monkeypatch):
     monkeypatch.setenv("HMAC_SECRET", "s")
     with patch("app.worker.sources.requests.get", return_value=_resp(DAILY)) as get:
         r = sources.fetch_frost_nights("http://w", T, "urn:p:1", 7)
@@ -111,11 +114,11 @@ def test_fetch_nights_signs_request_and_asks_two_past_days(monkeypatch):
     assert url == "http://w/api/weather/parcel/urn:p:1/daily"
     assert kw["headers"]["X-Auth-Signature"] and kw["headers"]["X-Tenant-ID"] == T
     utc_today = datetime.now(timezone.utc).date()
-    assert kw["params"]["start"] == (utc_today - timedelta(days=2)).isoformat()
+    assert kw["params"]["start"] == (utc_today - timedelta(days=1)).isoformat()
     assert kw["params"]["end"] == (utc_today - timedelta(days=1)).isoformat()
-    assert kw["params"]["forecast_days"] == 7 and kw["params"]["fill"] == "open_meteo"
+    assert kw["params"]["forecast_days"] == 7 and kw["params"]["fill"] == "none"
     assert kw["timeout"] == 30
-    assert r.today == TODAY
+    assert r.today == TODAY and r.local_hour == 7
     by = {n.day: n for n in r.nights}
     assert by[date(2026, 11, 4)].tmin_c == 7.0          # cerrado: tmin_c
     assert by[date(2026, 11, 5)].tmin_c == 4.0          # running: la más fría
@@ -123,41 +126,72 @@ def test_fetch_nights_signs_request_and_asks_two_past_days(monkeypatch):
     assert by[date(2026, 11, 7)].tmin_c is None         # sin coldest: nunca tmin_c
 
 
+@pytest.mark.parametrize("status", [400, 401, 404])
+def test_fetch_nights_client_error_returns_none(status):
+    with patch("app.worker.sources.requests.get", return_value=_resp({}, status)):
+        assert sources.fetch_frost_nights("http://w", T, "urn:p:1", 7) is None
+
+
 @pytest.mark.parametrize("failure", [
-    {"status": 500}, {"status": 401}, {"raises": ConnectionError("down")},
+    {"status": 500}, {"status": 503}, {"raises": ConnectionError("down")},
+    {"raises": requests.exceptions.Timeout("slow")},
 ])
-def test_fetch_nights_failure_returns_none(failure):
+def test_fetch_nights_transport_or_5xx_raises_outage(failure):
     with patch("app.worker.sources.requests.get") as get:
         if "raises" in failure:
             get.side_effect = failure["raises"]
         else:
             get.return_value = _resp({}, failure["status"])
-        assert sources.fetch_frost_nights("http://w", T, "urn:p:1", 7) is None
+        with pytest.raises(sources.WeatherOutage):
+            sources.fetch_frost_nights("http://w", T, "urn:p:1", 7)
 
 
-def test_missing_local_today_is_no_data():
-    body = {k: v for k, v in DAILY.items() if k != "local_today"}
+@pytest.mark.parametrize("field", ["local_today", "local_now"])
+def test_missing_local_clock_is_no_data(field):
+    body = {k: v for k, v in DAILY.items() if k != field}
     with patch("app.worker.sources.requests.get", return_value=_resp(body)):
         assert sources.fetch_frost_nights("http://w", T, "urn:p:1", 7) is None
+
+
+@pytest.mark.parametrize("field", ["local_today", "local_now"])
+def test_null_or_garbled_local_clock_is_no_data(field):
+    for bad in (None, "garbage"):
+        with patch("app.worker.sources.requests.get", return_value=_resp({**DAILY, field: bad})):
+            assert sources.fetch_frost_nights("http://w", T, "urn:p:1", 7) is None
+
+
+def test_only_forecast_gaps_are_logged(caplog):
+    quiet = {**DAILY, "missing_reasons": {"2026-11-04": "no_data"}}
+    with caplog.at_level(logging.WARNING), \
+            patch("app.worker.sources.requests.get", return_value=_resp(quiet)):
+        assert sources.fetch_frost_nights("http://w", T, "urn:p:1", 7) is not None
+    assert not caplog.records
+    loud = {**DAILY, "missing_reasons": {"2026-11-04": "no_data", "2026-11-09": "forecast_unavailable"}}
+    with caplog.at_level(logging.WARNING), \
+            patch("app.worker.sources.requests.get", return_value=_resp(loud)):
+        sources.fetch_frost_nights("http://w", T, "urn:p:1", 7)
+    msg = caplog.records[0].getMessage()
+    assert "2026-11-09" in msg and "2026-11-04" not in msg
 
 
 # ── no_data ───────────────────────────────────────────────────────────
 
 
 def test_no_data_does_not_resolve_active_alert_and_logs_error(caplog):
-    existing = {dated(date(2026, 11, 6)): alert(spell=spell(date(2026, 11, 6)))}
+    past = date(2026, 11, 4)
+    existing = {dated(past): alert(spell=spell(past))}
     with caplog.at_level(logging.ERROR):
         out, orion, pub, touched = run(None, existing)
     assert out == "no_data"
     orion.append_entity_attrs.assert_not_called()
     pub.assert_not_called()
-    assert touched == set()  # el TTL sigue pudiendo caducarla
+    assert touched == set()  # noche ya pasada: el TTL sigue pudiendo caducarla
     rec = [r for r in caplog.records if r.levelno == logging.ERROR][0].getMessage()
     assert T in rec and PARCEL in rec and "weather_unavailable" in rec
 
 
 def test_incomplete_near_nights_is_no_data_and_does_not_resolve():
-    f = sources.FrostNights([n for n in nights() if n.day != TODAY + timedelta(days=2)], TODAY, None)
+    f = sources.FrostNights([n for n in nights() if n.day != TODAY + timedelta(days=2)], TODAY, None, 12)
     existing = {OLD_ID: alert()}
     out, orion, pub, touched = run(f, existing)
     assert out == "no_data" and not orion.append_entity_attrs.called and not touched
@@ -211,7 +245,8 @@ def test_legacy_undated_frost_alert_is_resolved_on_first_run():
     assert pub.call_args[1]["alert_id"] == dated(date(2026, 11, 6))
 
 
-def test_later_frost_within_gap_reuses_resolved_spell_without_revibrating():
+def test_frost_returning_after_a_resolve_vibrates_again_on_the_same_id():
+    # Resolver libera la deduplicación en notifications: vuelve a vibrar (peca de avisar).
     start = date(2026, 11, 6)
     aid = dated(start)
     existing = {aid: alert(status="resolved",
@@ -219,7 +254,7 @@ def test_later_frost_within_gap_reuses_resolved_spell_without_revibrating():
     out, orion, pub, _ = run(fetched({2: 1.0}), existing)
     assert out == "published"
     kw = pub.call_args[1]
-    assert kw["alert_id"] == aid and kw["urgency"] == "silent"
+    assert kw["alert_id"] == aid and kw["urgency"] == "vibrate"
     assert not orion.append_entity_attrs.called
 
 
@@ -266,6 +301,41 @@ def test_dismissed_then_new_spell_vibrates():
 # ── vibración ─────────────────────────────────────────────────────────
 
 
+def test_near_keeps_sending_vibrate_after_the_spell_flag_is_set():
+    # Notifications deduplica por (id, severidad) y solo anota lo enviado: repetir
+    # `vibrate` reintenta un push fallido y no vuelve a vibrar tras el éxito.
+    start = date(2026, 11, 7)
+    aid = dated(start)
+    existing = {aid: alert(observed="2026-11-05T05:00:00Z", spell=spell(start, vibrated=True))}
+    out, _, pub, _ = run(fetched({2: 1.0}), existing)
+    assert out == "published" and pub.call_args[1]["urgency"] == "vibrate"
+    assert pub.call_args[1]["evaluation_data"]["spell"]["vibrated"] is True
+
+
+def test_running_night_before_ten_publishes_this_dawn():
+    with patch("app.worker.alert_publisher.SyncOrionClient") as M:
+        inst = M.return_value.__enter__.return_value
+        inst.upsert_entities_batch.return_value = {"upserted": 1, "errors": []}
+        inst.get_entity.return_value = {"name": "Soto"}
+        f = sources.FrostNights(
+            [Night(TODAY, 1.0, "running")] + nights()[1:], TODAY, None, 3)
+        with patch.object(fa.sources, "fetch_frost_nights", return_value=f):
+            out = fa.process_frost_parcel(
+                MagicMock(), conn_with(), SETTINGS, T, RISK, {"id": PARCEL}, {}, set(), NOW)
+    e = inst.upsert_entities_batch.call_args[0][0][0]
+    assert out == "published"
+    assert e["id"] == dated(TODAY) and e["urgency"]["value"] == "vibrate"
+    assert e["plain"]["value"]["es"]["body"] == "Esta madrugada puede bajar a 1 °C."
+
+
+def test_running_night_after_ten_resolves():
+    aid = dated(TODAY)
+    existing = {aid: alert(spell=spell(TODAY))}
+    f = sources.FrostNights([Night(TODAY, 1.0, "running")] + nights()[1:], TODAY, None, 10)
+    out, orion, _, _ = run(f, existing)
+    assert out == "resolved" and marked(orion) == {aid: "resolved"}
+
+
 def test_vibrate_only_when_decision_vibrates_else_silent():
     _, _, pub, _ = run(fetched({4: 1.0}), {})
     assert pub.call_args[1]["urgency"] == "vibrate"
@@ -303,6 +373,238 @@ def test_one_failing_parcel_does_not_stop_the_others():
     with patch.object(fa, "process_frost_parcel", side_effect=outcomes):
         c = _evaluate_frost_risk(orion, MagicMock(), SETTINGS, T, RISK, {}, set(), NOW, None)
     assert c == {"evaluated": 1, "errors": 1, "frost_no_data": 0}
+
+
+# ── freno por tenant (I1) ─────────────────────────────────────────────
+
+
+def _parcels(n):
+    return [{"id": f"urn:ngsi-ld:AgriParcel:p{i}"} for i in range(n)]
+
+
+def _frost_pass(n, fetch_side_effect, caplog):
+    from app.worker.processor import _evaluate_frost_risk
+
+    orion = MagicMock()
+    orion.query_entities.return_value = _parcels(n)
+    touched = set()
+    with caplog.at_level(logging.ERROR), \
+            patch.object(fa.sources, "fetch_frost_nights", side_effect=fetch_side_effect) as fetch, \
+            patch.object(fa, "publish_alert", return_value=True):
+        c = _evaluate_frost_risk(orion, conn_with(), SETTINGS, T, RISK, {}, touched, NOW, None)
+    return c, fetch
+
+
+def test_breaker_opens_after_three_outages_and_logs_one_count(caplog):
+    outage = sources.WeatherOutage("down")
+    c, fetch = _frost_pass(10, [outage, outage, outage], caplog)
+    assert fetch.call_count == 3
+    assert c["frost_no_data"] == 10
+    lines = [r.getMessage() for r in caplog.records if "breaker_open" in r.getMessage()]
+    assert len(lines) == 1 and "skipped=7" in lines[0] and T in lines[0]
+
+
+def test_breaker_resets_on_any_answer(caplog):
+    outage = sources.WeatherOutage("down")
+    effects = [outage, outage, fetched(), outage, outage, None, outage, outage, fetched(), fetched()]
+    c, fetch = _frost_pass(10, effects, caplog)
+    assert fetch.call_count == 10
+    assert not [r for r in caplog.records if "breaker_open" in r.getMessage()]
+    assert c["frost_no_data"] == 7
+
+
+def test_breaker_does_not_open_on_answers_without_data(caplog):
+    # 200 sin local_today (parcela sin geometría) no es caída: no apaga al resto.
+    c, fetch = _frost_pass(5, [None] * 5, caplog)
+    assert fetch.call_count == 5 and c["frost_no_data"] == 5
+
+
+def test_breaker_open_keeps_a_frost_still_ahead():
+    breaker = fa.FrostBreaker()
+    for _ in range(fa.BREAKER_FAILURES):
+        breaker.failure()
+    start = date(2026, 11, 7)
+    aid = dated(start)
+    existing = {aid: alert(spell=spell(start))}
+    touched = set()
+    with patch.object(fa.sources, "fetch_frost_nights") as fetch:
+        out = fa.process_frost_parcel(
+            MagicMock(), conn_with(), SETTINGS, T, RISK, {"id": PARCEL}, existing, touched, NOW, breaker)
+    assert out == "no_data" and aid in touched and breaker.skipped == 1
+    fetch.assert_not_called()
+
+
+# ── sin dato con la helada por delante (I5) ───────────────────────────
+
+
+def test_no_data_keeps_alert_while_its_night_is_ahead():
+    for last, kept in ((date(2026, 11, 7), True), (TODAY, True), (date(2026, 11, 4), False)):
+        aid = dated(date(2026, 11, 3))
+        existing = {aid: alert(spell=spell(date(2026, 11, 3), last=last))}
+        out, orion, pub, touched = run(None, existing)
+        assert out == "no_data" and (aid in touched) is kept, last
+        assert not orion.append_entity_attrs.called and not pub.called
+
+
+def test_no_data_keeps_only_the_latest_active():
+    old, new = dated(date(2026, 11, 1)), dated(date(2026, 11, 7))
+    existing = {
+        old: alert(observed="2026-11-01T10:00:00Z", spell=spell(date(2026, 11, 7))),
+        new: alert(observed="2026-11-05T10:00:00Z", spell=spell(date(2026, 11, 7))),
+    }
+    _, _, _, touched = run(None, existing)
+    assert touched == {new}
+
+
+def test_no_data_ignores_resolved_alert_and_other_parcels():
+    aid = dated(date(2026, 11, 7))
+    other = "urn:ngsi-ld:Alert:acme:frost:p2:20261107"
+    existing = {
+        aid: alert(status="resolved", spell=spell(date(2026, 11, 7))),
+        other: alert(spell=spell(date(2026, 11, 7)), ref="urn:ngsi-ld:AgriParcel:p2"),
+    }
+    _, _, _, touched = run(None, existing)
+    assert touched == set()
+
+
+def test_no_data_partial_keeps_alert_and_logs_reason(caplog):
+    start = date(2026, 11, 11)  # lead 6
+    aid = dated(start)
+    existing = {aid: alert(spell=spell(start, vibrated=False, stage="far"))}
+    with caplog.at_level(logging.ERROR):
+        out, orion, _, touched = run(fetched({5: None, 6: None, 7: None}), existing)
+    assert out == "no_data" and not orion.append_entity_attrs.called and aid in touched
+    assert any("reason=partial" in r.getMessage() for r in caplog.records)
+
+
+def test_no_data_with_expiry_sweep_only_expires_past_nights():
+    ahead = dated(date(2026, 11, 7))
+    past = dated(date(2026, 11, 1))
+    old = "2026-11-03T10:00:00Z"  # 50 h: fuera del TTL de 24 h
+    for aid, start in ((ahead, date(2026, 11, 7)), (past, date(2026, 11, 1))):
+        existing = {aid: alert(observed=old, spell=spell(start))}
+        out, orion, _, touched = run(None, existing)
+        assert out == "no_data"
+        n = lc.sweep_expired(orion, existing, touched, {"frost": MODEL_CONFIG}, NOW)
+        assert n == (0 if aid == ahead else 1)
+
+
+# ── regla de publicación (I9) ─────────────────────────────────────────
+
+
+def _published_state(fetch, **alert_kw):
+    """Publica una vez y devuelve la Alert tal y como la leería la siguiente pasada."""
+    out, _, pub, _ = run(fetch, {})
+    assert out == "published"
+    kw = pub.call_args[1]
+    return kw["alert_id"], {
+        **alert(**alert_kw), "evaluation_data": kw["evaluation_data"],
+    }
+
+
+def test_publish_rule_unchanged_key_recent_does_not_write():
+    aid, info = _published_state(fetched({3: 1.0}), observed="2026-11-05T11:00:00Z")
+    out, orion, pub, touched = run(fetched({3: 1.0}), {aid: info})
+    assert out == "unchanged" and not pub.called and aid in touched
+    assert not orion.append_entity_attrs.called
+
+
+def test_publish_rule_rounding_same_degree_does_not_write():
+    aid, info = _published_state(fetched({3: 1.1}), observed="2026-11-05T11:00:00Z")
+    assert run(fetched({3: 1.4}), {aid: info})[0] == "unchanged"
+
+
+@pytest.mark.parametrize("changed", [
+    {3: 0.4},                 # mínima redondeada
+    {3: -6.0},                # escalón y severidad
+    {2: 1.0, 3: 1.0},         # noche del texto
+])
+def test_publish_rule_changed_key_writes(changed):
+    aid, info = _published_state(fetched({3: 1.0}), observed="2026-11-05T11:59:00Z")
+    out, _, pub, _ = run(fetched(changed), {aid: info})
+    assert out == "published" and pub.called
+
+
+def test_publish_rule_urgency_change_writes():
+    aid, info = _published_state(fetched({3: 1.0}), observed="2026-11-05T11:59:00Z")
+    out, _, pub, _ = run(fetched({3: 1.0}, hour=23), {aid: info})  # horas de silencio
+    assert out == "published" and pub.call_args[1]["urgency"] == "silent"
+
+
+def test_publish_rule_six_hours_refreshes():
+    aid, info = _published_state(fetched({3: 1.0}), observed="2026-11-05T06:00:00Z")
+    out, _, pub, _ = run(fetched({3: 1.0}), {aid: info})
+    assert out == "published" and pub.called
+    aid, info = _published_state(fetched({3: 1.0}), observed="2026-11-05T06:00:01Z")
+    assert run(fetched({3: 1.0}), {aid: info})[0] == "unchanged"
+
+
+def test_publish_rule_vibrate_retries_hourly_when_close():
+    for lead in (1,):
+        aid, info = _published_state(fetched({lead: 1.0}), observed="2026-11-05T11:59:00Z")
+        out, _, pub, _ = run(fetched({lead: 1.0}), {aid: info})
+        assert out == "published" and pub.call_args[1]["urgency"] == "vibrate"
+    # Lead 2: no hay reintento horario.
+    aid, info = _published_state(fetched({2: 1.0}), observed="2026-11-05T11:59:00Z")
+    assert run(fetched({2: 1.0}), {aid: info})[0] == "unchanged"
+
+
+def test_publish_rule_silent_close_does_not_retry():
+    muted = conn_with({"vibrate": False})
+    out, _, pub, _ = run(fetched({1: 1.0}), {}, conn=muted)
+    aid = pub.call_args[1]["alert_id"]
+    info = {**alert(observed="2026-11-05T11:59:00Z"), "evaluation_data": pub.call_args[1]["evaluation_data"]}
+    assert run(fetched({1: 1.0}), {aid: info}, conn=muted)[0] == "unchanged"
+
+
+def test_publish_rule_silent_alert_refreshes_text_when_its_wording_changes():
+    # Silenciada: a medianoche pasa de lead 1 («esta noche») a lead 0 («esta madrugada»).
+    muted = conn_with({"vibrate": False})
+    _, _, pub, _ = run(fetched({1: 1.0}, hour=23), {}, conn=muted)
+    aid = pub.call_args[1]["alert_id"]
+    info = {**alert(observed="2026-11-05T23:00:00Z"), "evaluation_data": pub.call_args[1]["evaluation_data"]}
+    tomorrow = TODAY + timedelta(days=1)
+    roll = sources.FrostNights(
+        [Night(tomorrow + timedelta(days=i), 1.0 if i == 0 else 10.0, "running" if i == 0 else "forecast")
+         for i in range(0, 8)], tomorrow, None, 0)
+    with patch.object(fa.sources, "fetch_frost_nights", return_value=roll), \
+            patch.object(fa, "publish_alert", return_value=True) as pub2:
+        out = fa.process_frost_parcel(
+            MagicMock(), muted, SETTINGS, T, RISK, {"id": PARCEL}, {aid: info}, set(),
+            datetime(2026, 11, 5, 23, 30, tzinfo=timezone.utc))
+    assert out == "published" and pub2.call_args[1]["evaluation_data"]["text_lead"] == 0
+
+
+@pytest.mark.parametrize("status", ["resolved", "expired"])
+def test_publish_rule_closed_alert_with_same_key_is_reopened(status):
+    # El aviso volvió a estar en riesgo: «sin cambios» no puede dejarlo cerrado.
+    aid, info = _published_state(fetched({3: 1.0}), status=status, observed="2026-11-05T11:59:00Z")
+    out, _, pub, _ = run(fetched({3: 1.0}), {aid: info})
+    assert out == "published" and pub.called
+
+
+def test_publish_rule_unreadable_date_publishes():
+    aid, info = _published_state(fetched({3: 1.0}), observed=None)
+    assert run(fetched({3: 1.0}), {aid: info})[0] == "published"
+
+
+def test_unchanged_still_retries_resolving_the_old_alert():
+    aid, info = _published_state(fetched({3: 1.0}), observed="2026-11-05T11:00:00Z")
+    old = dated(date(2026, 10, 20))
+    existing = {aid: info, old: alert(observed="2026-10-25T10:00:00Z",
+                                      spell=spell(date(2026, 10, 20), last=date(2026, 10, 24)))}
+    out, orion, pub, _ = run(fetched({3: 1.0}), existing)
+    assert out == "unchanged" and not pub.called and marked(orion) == {old: "resolved"}
+
+
+def test_unmuting_mid_spell_vibrates_on_the_next_run():
+    muted = conn_with({"vibrate": False})
+    _, _, pub, _ = run(fetched({3: 1.0}), {}, conn=muted)
+    assert pub.call_args[1]["urgency"] == "silent"
+    aid = pub.call_args[1]["alert_id"]
+    info = {**alert(observed="2026-11-05T11:59:00Z"), "evaluation_data": pub.call_args[1]["evaluation_data"]}
+    out, _, pub2, _ = run(fetched({3: 1.0}), {aid: info})
+    assert out == "published" and pub2.call_args[1]["urgency"] == "vibrate"
 
 
 # ── contrato y modelos ────────────────────────────────────────────────
@@ -439,3 +741,160 @@ def test_non_severe_text_stays_on_next_night():
     _, _, pub, _ = run(fetched({1: 2.0, 3: -1.0}), {})
     data = pub.call_args[1]["evaluation_data"]
     assert data["stage"] == "near" and data["text_night"] == data["next_night"] == "2026-11-06"
+
+
+# ── processor: orden del catálogo, paginado, resultado ────────────────
+
+
+def test_catalog_runs_frost_first_and_keeps_the_rest_in_order():
+    from app.worker import processor
+
+    catalog = [{"alert_type": "a", "model_type": "x"}, {"alert_type": "b", "model_type": "y"},
+               {"alert_type": "frost", "model_type": "frost"}, {"alert_type": "c", "model_type": "z"}]
+    assert [r["alert_type"] for r in processor._frost_first(catalog)] == ["frost", "a", "b", "c"]
+
+
+def test_get_entities_pages_until_a_short_page():
+    from app.worker import processor
+
+    page = lc._PAGE
+    orion = MagicMock()
+    orion.query_entities.side_effect = [
+        [{"id": f"p{i}"} for i in range(page)],
+        [{"id": f"q{i}"} for i in range(page)],
+        [{"id": "last"}],
+    ]
+    out = processor._get_entities(orion, "AgriParcel")
+    assert len(out) == 2 * page + 1
+    offsets = [c.kwargs["offset"] for c in orion.query_entities.call_args_list]
+    assert offsets == [0, page, 2 * page]
+    assert all(c.kwargs["limit"] == page and c.kwargs["type"] == "AgriParcel"
+               for c in orion.query_entities.call_args_list)
+
+
+def test_get_entities_exact_page_stops_on_empty():
+    from app.worker import processor
+
+    page = lc._PAGE
+    orion = MagicMock()
+    orion.query_entities.side_effect = [[{"id": f"p{i}"} for i in range(page)], []]
+    assert len(processor._get_entities(orion, "AgriParcel")) == page
+
+
+def test_empty_catalog_reports_frost_no_data_key():
+    from app.worker import processor
+
+    with patch.object(processor, "_get_catalog", return_value=[]), \
+            patch.object(processor, "get_settings", return_value=SETTINGS):
+        assert processor._evaluate_risks(MagicMock(), T) == {
+            "evaluated": 0, "errors": 0, "frost_no_data": 0}
+
+
+# ── ida y vuelta del estado de la racha por Orion (forma normalizada) ─
+
+
+class _NormalizedOrion:
+    """Guarda y devuelve Alert como las devuelve Orion: observedAt es Property con cadena."""
+
+    def __init__(self):
+        self.entities = {}
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *a):
+        return False
+
+    def get_entity(self, eid, options=None):
+        return {"name": "Soto"}
+
+    def upsert_entities_batch(self, ents):
+        for raw in ents:
+            e = dict(raw)
+            e.pop("@context", None)
+            e["observedAt"] = {"type": "Property", "value": raw["observedAt"]}
+            self.entities[e["id"]] = json.loads(json.dumps(e))
+        return {"upserted": len(ents), "errors": []}
+
+    def query_entities(self, type=None, limit=100, offset=0, q=None):
+        return [json.loads(json.dumps(v)) for v in self.entities.values()][offset:offset + limit]
+
+    def append_entity_attrs(self, eid, attrs):
+        self.entities[eid].update(json.loads(json.dumps(attrs)))
+
+
+def _roundtrip_run(broker, fetch, now):
+    existing = lc.load_existing(broker)
+    touched = set()
+    with patch("app.worker.alert_publisher.SyncOrionClient", return_value=broker), \
+            patch("app.alerts.contract._now", lambda: now.isoformat().replace("+00:00", "Z")), \
+            patch.object(fa.sources, "fetch_frost_nights", return_value=fetch):
+        out = fa.process_frost_parcel(
+            broker, conn_with(), SETTINGS, T, RISK, {"id": PARCEL, "type": "AgriParcel"},
+            existing, touched, now)
+    return out, existing, touched
+
+
+def test_round_trip_two_runs_no_second_publish_keeps_spell():
+    broker = _NormalizedOrion()
+    f = fetched({3: 1.0})
+    out, _, _ = _roundtrip_run(broker, f, NOW)
+    assert out == "published"
+    aid = dated(date(2026, 11, 8))
+    written = broker.entities[aid]
+    assert written["observedAt"]["type"] == "Property"
+    assert written["evaluationData"]["value"]["spell"]["vibrated"] is True
+
+    before = json.dumps(broker.entities[aid], sort_keys=True)
+    out, existing, touched = _roundtrip_run(broker, f, NOW + timedelta(hours=1))
+    assert out == "unchanged" and aid in touched
+    assert json.dumps(broker.entities[aid], sort_keys=True) == before  # sin escritura
+
+    # El estado leído de la Alert normalizada es el que escribió la primera pasada.
+    info = existing[aid]
+    assert info["ref_entity"] == PARCEL and info["status"] == "active"
+    state = fa._read_spell(info, aid)
+    assert state is not None and state.start == date(2026, 11, 8) and state.vibrated
+    assert state.last_night == date(2026, 11, 8) and state.stage == "near"
+    assert lc._parse(info["observed_at"]) == NOW
+
+
+def test_round_trip_two_active_alerts_latest_wins_and_decides():
+    broker = _NormalizedOrion()
+    # Racha antigua activa (se quedó sin cerrar), publicada antes: su estado no debe contar.
+    old_start = date(2026, 10, 20)
+    old_nights = sources.FrostNights(
+        [Night(old_start + timedelta(days=i), 1.0 if i == 1 else 10.0, "forecast") for i in range(0, 8)],
+        old_start, None, 12)
+    _roundtrip_run(broker, old_nights, datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc))
+    old_id = dated(old_start + timedelta(days=1))
+    assert broker.entities[old_id]["status"]["value"] == "active"
+
+    # Racha nueva activa: se publica y el cierre de la antigua falla, así que quedan dos.
+    new_id = dated(date(2026, 11, 8))
+    with patch.object(_NormalizedOrion, "append_entity_attrs", side_effect=RuntimeError("down")):
+        out, _, _ = _roundtrip_run(broker, fetched({3: 1.0}), NOW)
+    assert out == "published"
+    assert broker.entities[old_id]["status"]["value"] == "active"
+    assert broker.entities[new_id]["status"]["value"] == "active"
+
+    existing = lc.load_existing(broker)
+    assert fa._latest(fa._frost_alerts_of(existing, PARCEL)) == new_id
+
+    # Siguiente pasada: decide con la racha nueva, no escribe y reintenta cerrar la antigua.
+    out, _, _ = _roundtrip_run(broker, fetched({3: 1.0}), NOW + timedelta(hours=1))
+    assert out == "unchanged"
+    assert broker.entities[new_id]["observedAt"]["value"].startswith("2026-11-05T12:00")
+    assert broker.entities[old_id]["status"]["value"] == "resolved"
+
+
+def test_round_trip_resolved_alert_keeps_state_for_the_next_spell():
+    broker = _NormalizedOrion()
+    _roundtrip_run(broker, fetched({3: 1.0}), NOW)
+    aid = dated(date(2026, 11, 8))
+    out, _, _ = _roundtrip_run(broker, fetched(), NOW + timedelta(hours=1))
+    assert out == "resolved" and broker.entities[aid]["status"]["value"] == "resolved"
+    # La misma noche vuelve dentro de la hora: reabre el mismo id.
+    out, _, _ = _roundtrip_run(broker, fetched({3: 1.0}), NOW + timedelta(hours=2))
+    assert out == "published" and broker.entities[aid]["status"]["value"] == "active"
+    assert broker.entities[aid]["urgency"]["value"] == "vibrate"

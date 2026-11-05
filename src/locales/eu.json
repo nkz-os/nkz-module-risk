@@ -55,7 +55,7 @@
     "title": "Parcel alerts",
     "empty": "No alerts for this entity",
     "frostVibrate": "Telefonoak dardara egin izotz-abisuekin",
-    "frostVibrateHelp": "Desaktibatzen baduzu, telefonoak ez du dardararik egingo lursail honetako izotzagatik. Abisua aplikazioan agertzen jarraitzen du.",
+    "frostVibrateHelp": "Desaktibatzen baduzu, ez duzu lursail honetako izotzaren berehalako abisua jasoko. Abisua aplikazioan eta eguneko laburpenean geratzen da.",
     "frostVibrateError": "Ezin izan da ezarpena kargatu edo gorde"
   },
   "widget": {

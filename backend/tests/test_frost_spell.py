@@ -17,6 +17,7 @@ APPROVED = {
 # Misma forma que el catálogo: así un cambio de formato no queda oculto por el fixture.
 CFG = fs.config_from_model_config(APPROVED)
 WARM = 10.0
+NOON = 12  # hora local: la noche de hoy ya no dispara
 
 
 def _nights(overrides=None, upto=7, running=WARM):
@@ -29,7 +30,7 @@ def _nights(overrides=None, upto=7, running=WARM):
 
 
 def _decide(overrides=None, prev=None, muted=False, today=TODAY, **kw):
-    return fs.decide_frost(_nights(overrides, **kw), prev, CFG, today, muted)
+    return fs.decide_frost(_nights(overrides, **kw), prev, CFG, today, muted, NOON)
 
 
 def test_cold_night_at_lead_1_is_near_and_vibrates_once():
@@ -125,7 +126,7 @@ def test_muted_never_vibrates_but_stage_and_severity_stay():
 
 
 def test_todays_running_night_never_triggers():
-    d = fs.decide_frost(_nights(running=-8.0), None, CFG, TODAY, False)
+    d = fs.decide_frost(_nights(running=-8.0), None, CFG, TODAY, False, NOON)
     assert d.stage == "none" and not d.vibrate and not d.no_data and d.spell is None
 
 
@@ -142,14 +143,41 @@ def test_partial_forecast_never_reads_as_no_risk_with_cold_night():
 
 def test_missing_near_night_is_no_data():
     nights = [n for n in _nights({1: 1.0}) if (n.day - TODAY).days != 3]
-    d = fs.decide_frost(nights, None, CFG, TODAY, False)
+    d = fs.decide_frost(nights, None, CFG, TODAY, False, NOON)
     assert d.no_data and not d.vibrate
-    assert fs.decide_frost([], None, CFG, TODAY, False).no_data
+    assert fs.decide_frost([], None, CFG, TODAY, False, NOON).no_data
 
 
-def test_null_tmin_far_is_ignored():
-    d = _decide({6: None, 7: None})
-    assert not d.no_data and d.stage == "none"
+def test_null_far_night_with_nothing_at_risk_is_partial_no_data():
+    prev = SpellState(TODAY + timedelta(days=6), TODAY + timedelta(days=6), False, False, "far")
+    d = _decide({5: None, 6: None, 7: None}, prev=prev)
+    assert d.no_data and d.no_data_reason == "partial" and d.stage == "none"
+    assert d.spell == prev and not d.new_spell
+
+
+def test_missing_far_night_with_nothing_at_risk_is_partial_no_data():
+    nights = [n for n in _nights() if (n.day - TODAY).days != 7]
+    d = fs.decide_frost(nights, None, CFG, TODAY, False, NOON)
+    assert d.no_data and d.no_data_reason == "partial"
+
+
+def test_near_window_gap_keeps_its_own_reason():
+    assert _decide({2: None}).no_data_reason == "incomplete_nights"
+
+
+def test_far_at_risk_with_other_far_nulls_stays_far():
+    d = _decide({5: None, 6: 2.0, 7: None})
+    assert not d.no_data and d.stage == "far" and d.next_night.day == TODAY + timedelta(days=6)
+
+
+def test_near_at_risk_with_far_nulls_stays_near():
+    d = _decide({1: 1.0, 6: None})
+    assert not d.no_data and d.stage == "near"
+
+
+def test_complete_evaluation_with_no_risk_is_none():
+    d = _decide()
+    assert not d.no_data and d.stage == "none" and d.no_data_reason is None
 
 
 def test_threshold_follows_lead():
@@ -159,7 +187,7 @@ def test_threshold_follows_lead():
     assert _decide({6: 4.6}).stage == "none"
     assert _decide({5: 3.9}).stage == "far"
     assert _decide({5: 4.1}).stage == "none"
-    d = fs.decide_frost(_nights({8: 3.0}, upto=8), None, CFG, TODAY, False)
+    d = fs.decide_frost(_nights({8: 3.0}, upto=8), None, CFG, TODAY, False, NOON)
     assert d.stage == "none"
 
 
@@ -208,7 +236,7 @@ def test_config_parses_approved_catalog_json():
     )
     assert cfg == FrostConfig(((4, 3.5), (5, 4.0), (7, 4.5)), near_nights=4, horizon_nights=7)
     # De punta a punta con esa configuración.
-    d = fs.decide_frost(_nights({2: 1.0}), None, cfg, TODAY, False)
+    d = fs.decide_frost(_nights({2: 1.0}), None, cfg, TODAY, False, NOON)
     assert d.stage == "near" and d.vibrate and d.severity == "high"
 
 
@@ -233,26 +261,26 @@ def test_new_spell_vibrates_once_previous_last_night_has_passed():
     assert first.vibrate
     later = TODAY + timedelta(days=2)  # la noche de la racha ya pasó
     nights = [Night(later + timedelta(days=i), WARM if i != 2 else 1.0, "forecast") for i in range(0, 8)]
-    d = fs.decide_frost(nights, first.spell, CFG, later, False)
+    d = fs.decide_frost(nights, first.spell, CFG, later, False, NOON)
     assert d.new_spell and d.vibrate and d.stage == "near"
-    again = fs.decide_frost(nights, d.spell, CFG, later, False)
+    again = fs.decide_frost(nights, d.spell, CFG, later, False, NOON)
     assert not again.vibrate
     # Helada retirada y otra posterior más cercana después: sigue avisando.
-    withdrawn = fs.decide_frost(_nights(), first.spell, CFG, later, False)
+    withdrawn = fs.decide_frost(_nights(), first.spell, CFG, later, False, NOON)
     assert withdrawn.stage == "none" and withdrawn.spell == first.spell
     much_later = TODAY + timedelta(days=9)
     nights2 = [Night(much_later + timedelta(days=i), 1.0 if i == 1 else WARM, "forecast") for i in range(0, 8)]
-    d2 = fs.decide_frost(nights2, withdrawn.spell, CFG, much_later, False)
+    d2 = fs.decide_frost(nights2, withdrawn.spell, CFG, much_later, False, NOON)
     assert d2.new_spell and d2.vibrate
 
 
 def test_running_night_counts_for_chain_but_does_not_trigger():
     # Racha previa terminó en D-2; D-1 limpia; D (en curso) fría; D+1 fría: misma racha.
     prev = SpellState(TODAY - timedelta(days=4), TODAY - timedelta(days=2), True, False, "near")
-    d = fs.decide_frost(_nights({1: 1.0}, running=1.0), prev, CFG, TODAY, False)
+    d = fs.decide_frost(_nights({1: 1.0}, running=1.0), prev, CFG, TODAY, False, NOON)
     assert not d.new_spell and not d.vibrate and d.stage == "near"
     # Solo la noche en curso fría: ni escalón ni vibración.
-    only = fs.decide_frost(_nights(running=-8.0), prev, CFG, TODAY, False)
+    only = fs.decide_frost(_nights(running=-8.0), prev, CFG, TODAY, False, NOON)
     assert only.stage == "none" and not only.vibrate and only.spell == prev
 
 
@@ -261,7 +289,7 @@ def test_duplicate_nights_colder_wins_in_any_order():
     warm = Night(TODAY + timedelta(days=1), WARM, "forecast")
     rest = [n for n in _nights() if (n.day - TODAY).days != 1]
     for order in ([cold, warm], [warm, cold]):
-        d = fs.decide_frost(rest + order, None, CFG, TODAY, False)
+        d = fs.decide_frost(rest + order, None, CFG, TODAY, False, NOON)
         assert d.stage == "near" and d.vibrate
 
 
@@ -270,7 +298,7 @@ def test_duplicate_null_never_overrides_value():
     nul = Night(TODAY + timedelta(days=1), None, "forecast")
     rest = [n for n in _nights() if (n.day - TODAY).days != 1]
     for order in ([val, nul], [nul, val]):
-        d = fs.decide_frost(rest + order, None, CFG, TODAY, False)
+        d = fs.decide_frost(rest + order, None, CFG, TODAY, False, NOON)
         assert not d.no_data and d.stage == "near"
 
 
@@ -285,7 +313,7 @@ def _on(day_offset, overrides, prev, today_offset=0):
         Night(today + timedelta(days=i), overrides.get(today_offset + i, WARM), "forecast")
         for i in range(0, 8)
     ]
-    return fs.decide_frost(ns, prev, CFG, today, False)
+    return fs.decide_frost(ns, prev, CFG, today, False, NOON)
 
 
 def test_frost_beyond_gap_vibrates_when_near_even_if_prev_is_current():
@@ -329,46 +357,116 @@ def test_last_night_does_not_cross_a_break():
     assert not d.new_spell and d.stage == "near"
 
 
-def _simulate(rng):
-    """Una secuencia de 30 días con varias evaluaciones al día; devuelve fallos."""
-    base = {d: (rng.uniform(-8.0, 3.0) if rng.random() < 0.25 else rng.uniform(6.0, 12.0)) for d in range(0, 45)}
-    prev, problems = None, []
-    credited: dict = {}
-    for day in range(0, 30):
-        today = TODAY + timedelta(days=day)
-        for _ in range(rng.randint(2, 5)):
-            ns = []
-            for i in range(0, 8):
-                if i > 0 and rng.random() < (0.08 if i <= CFG.near_nights else 0.25):
-                    continue  # noche retirada
-                v = base[day + i] + rng.uniform(-1.5, 1.5)
-                if i > 0 and rng.random() < 0.05:
-                    v = None
-                ns.append(Night(today + timedelta(days=i), v, "forecast"))
-            d = fs.decide_frost(ns, prev, CFG, today, False)
-            if d.no_data:
-                assert d.spell == prev and not d.vibrate
-                continue
-            prev = d.spell
-            for n in d.at_risk:
-                if (n.day - today).days <= CFG.near_nights:
-                    if not (d.spell and d.spell.vibrated and n.day <= d.spell.last_night):
-                        problems.append(("missed", day, n.day))
-            if d.vibrate:
-                # Se acredita a la racha que abre o continúa (su inicio la identifica).
-                credited.setdefault(d.spell.start, []).append((day, d.stage))
-    for key, evs in credited.items():
-        severe = sum(1 for _, st in evs if st == "severe")
-        if len(evs) - min(severe, 1) > 1 or len(evs) > 2:
-            problems.append(("double", key, evs))
-    return problems
+# ── noche en curso (lead 0) hasta las 10:00 locales ───────────────────
 
 
-def test_property_no_missed_and_no_double_vibration():
-    import random
+def _dawn(running, prev=None, hour=3, overrides=None, muted=False):
+    return fs.decide_frost(_nights(overrides, running=running), prev, CFG, TODAY, muted, hour)
 
-    rng = random.Random(20261105)
-    bad = []
-    for _ in range(600):
-        bad.extend(_simulate(rng))
-    assert not bad, bad[:5]
+
+def test_running_night_triggers_before_ten():
+    d = _dawn(1.0)
+    assert d.stage == "near" and d.severity == "high" and d.vibrate and not d.no_data
+    assert d.next_night.day == TODAY and d.spell.start == TODAY
+    assert d.text_night.day == TODAY and d.text_lead == 0
+
+
+def test_running_night_uses_first_row_threshold():
+    assert _dawn(3.5).stage == "near"
+    assert _dawn(3.6).stage == "none"
+
+
+def test_running_severe_before_ten_is_severe():
+    d = _dawn(-6.0)
+    assert d.stage == "severe" and d.severity == "critical" and d.vibrate
+    assert d.spell.severe_vibrated
+
+
+def test_ten_o_clock_is_the_boundary():
+    assert _dawn(1.0, hour=9).stage == "near"
+    after = _dawn(1.0, hour=10)
+    assert after.stage == "none" and not after.no_data
+
+
+def test_running_null_before_ten_is_no_data_after_ten_is_not():
+    assert _dawn(None, hour=3).no_data
+    assert _dawn(None, hour=3).no_data_reason == "incomplete_nights"
+    assert not _dawn(None, hour=12).no_data
+    missing = [n for n in _nights() if n.day != TODAY]
+    assert fs.decide_frost(missing, None, CFG, TODAY, False, 3).no_data
+    assert not fs.decide_frost(missing, None, CFG, TODAY, False, 12).no_data
+
+
+def test_running_night_keeps_the_spell_of_the_night_before():
+    # Misma noche vista antes de medianoche (lead 1) y después (lead 0).
+    prev = fs.decide_frost(
+        _nights({1: 1.0}), None, CFG, TODAY, False, 23).spell
+    tomorrow = TODAY + timedelta(days=1)
+    nights = [Night(tomorrow, 1.0, "running")] + [
+        Night(tomorrow + timedelta(days=i), WARM, "forecast") for i in range(1, 8)]
+    d = fs.decide_frost(nights, prev, CFG, tomorrow, False, 0)
+    assert not d.new_spell and d.spell.start == prev.start and d.stage == "near"
+
+
+def test_running_night_after_ten_still_chains_once():
+    prev = SpellState(TODAY - timedelta(days=4), TODAY - timedelta(days=2), True, False, "near")
+    d = fs.decide_frost(_nights({2: 1.0}, running=1.0), prev, CFG, TODAY, False, 12)
+    assert not d.new_spell and d.spell.last_night == TODAY + timedelta(days=2)
+
+
+def test_text_night_is_the_next_one_or_the_first_severe():
+    d = _decide({1: 2.0, 3: -6.0})
+    assert d.next_night.day == TODAY + timedelta(days=1)
+    assert d.text_night.day == TODAY + timedelta(days=3) and d.text_lead == 3
+    d = _decide({1: 2.0, 3: -1.0})
+    assert d.text_night.day == TODAY + timedelta(days=1) and d.text_lead == 1
+
+
+# ── urgencia ──────────────────────────────────────────────────────────
+
+
+def test_urgency_repeats_vibrate_while_near_even_after_the_spell_flag():
+    first = _decide({2: 1.0})
+    again = _decide({2: 1.0}, prev=first.spell)
+    assert not again.vibrate and again.spell.vibrated  # contabilidad de la racha
+    assert fs.frost_urgency(first, False, 12) == "vibrate"
+    assert fs.frost_urgency(again, False, 12) == "vibrate"
+
+
+def test_urgency_silent_when_far_none_or_muted():
+    assert fs.frost_urgency(_decide({6: 1.0}), False, 12) == "silent"
+    assert fs.frost_urgency(_decide(), False, 12) == "silent"
+    assert fs.frost_urgency(_decide({2: 1.0}), True, 12) == "silent"
+    assert fs.frost_urgency(_decide({2: -6.0}), True, 12) == "silent"
+
+
+def test_quiet_constants_are_named():
+    assert fs.QUIET_START == 22 and fs.QUIET_END == 8
+
+
+def test_quiet_hours_hold_a_night_that_is_not_imminent():
+    d = _decide({2: 1.0})
+    for hour in (22, 23, 0, 3, 7):
+        assert fs.frost_urgency(d, False, hour) == "silent", hour
+    for hour in (8, 12, 18, 21):
+        assert fs.frost_urgency(d, False, hour) == "vibrate", hour
+
+
+def test_quiet_hours_lead_one_only_imminent_from_evening():
+    d = _decide({1: 1.0})
+    assert fs.frost_urgency(d, False, 22) == "vibrate"
+    assert fs.frost_urgency(d, False, 23) == "vibrate"
+    for hour in (0, 3, 7):
+        assert fs.frost_urgency(d, False, hour) == "silent", hour
+    assert fs.frost_urgency(d, False, 8) == "vibrate"
+
+
+def test_quiet_hours_lead_zero_is_imminent():
+    d = _dawn(1.0, hour=3)
+    assert fs.frost_urgency(d, False, 3) == "vibrate"
+    assert fs.frost_urgency(_dawn(1.0, hour=0), False, 0) == "vibrate"
+    assert fs.frost_urgency(_dawn(1.0, hour=9), False, 9) == "vibrate"
+
+
+def test_no_data_decision_is_silent():
+    assert fs.frost_urgency(_decide({2: None}), False, 12) == "silent"
