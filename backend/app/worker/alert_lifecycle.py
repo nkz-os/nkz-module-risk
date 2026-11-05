@@ -68,6 +68,12 @@ def _value(attr: Any) -> Any:
     return attr.get("value") if isinstance(attr, dict) else attr
 
 
+def _ref_object(attr: Any) -> Optional[str]:
+    if isinstance(attr, dict):
+        return attr.get("object")
+    return attr if isinstance(attr, str) else None
+
+
 def load_existing(orion) -> Dict[str, Dict[str, Any]]:
     """Alert del tenant indexadas por id: estado, categoría, tipo y observedAt."""
     out: Dict[str, Dict[str, Any]] = {}
@@ -79,6 +85,8 @@ def load_existing(orion) -> Dict[str, Dict[str, Any]]:
                 "status": _value(e.get("status")) or "active",
                 "category": _value(e.get("category")),
                 "alert_type": _value(e.get("alertType")),
+                "ref_entity": _ref_object(e.get("refEntity")),
+                "evaluation_data": _value(e.get("evaluationData")),
                 "observed_at": _value(e.get("observedAt")),
                 "state_at": next(
                     (_value(e.get(k)) for k in ("resolvedAt", "expiredAt", "dismissedAt") if e.get(k)),

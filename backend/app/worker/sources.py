@@ -6,13 +6,15 @@ Todo vía SDK (SyncOrionClient) o psycopg2 — nunca requests crudo a Orion.
 """
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, List, NamedTuple, Optional
 
 import requests
 from nkz_platform_sdk.crypto import generate_hmac_signature
 
 from app.worker import weather_source
 from app.worker.crop_cycles import accumulation_start
+from app.worker.frost_spell import Night
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +161,81 @@ def fetch_weather_alerts(weather_api_url: str, tenant_id: str, parcel_id: str) -
     except Exception as e:
         logger.debug("weather-alerts fetch failed for %s: %s", parcel_id, e)
     return []
+
+
+# ── Noches de helada (weather-api /daily) ──────────────────────────────
+
+
+class FrostNights(NamedTuple):
+    """Noches de la previsión y la fecha local de la parcela que las ancla."""
+    nights: List[Night]
+    today: date
+    issued_at: Optional[str]
+
+
+_FROST_KINDS = {"closed", "running", "forecast"}
+
+
+def fetch_frost_nights(
+    weather_api_url: str,
+    tenant_id: str,
+    parcel_id: str,
+    horizon_nights: int,
+    timeout: float = 30,
+) -> Optional[FrostNights]:
+    """Noches (día D = noche de D-1 a D) de /daily, o None si no hay dato fiable.
+
+    None = sin dato, nunca «sin riesgo»: fallo de red, respuesta no 200, cuerpo
+    ilegible o sin `local_today` (un weather-api anterior ignora `forecast_days`
+    y no lo envía). `Night.tmin_c` es la mínima más fría de dos modelos en los
+    días `running`/`forecast`, y la mínima medida en los cerrados; un día de
+    previsión sin esa mínima queda en None y nunca cae a `tmin_c`.
+    """
+    utc_today = datetime.now(timezone.utc).date()
+    params = {
+        "start": (utc_today - timedelta(days=2)).isoformat(),
+        "end": (utc_today - timedelta(days=1)).isoformat(),
+        "fill": "open_meteo",
+        "forecast_days": horizon_nights,
+    }
+    try:
+        resp = requests.get(
+            f"{weather_api_url}/api/weather/parcel/{parcel_id}/daily",
+            params=params,
+            headers=_weather_api_headers(tenant_id),
+            timeout=timeout,
+        )
+        if resp.status_code != 200:
+            logger.warning(
+                "frost nights fetch %s for %s: %s",
+                resp.status_code, parcel_id, resp.text[:200],
+            )
+            return None
+        body = resp.json()
+        local_today = date.fromisoformat(str(body["local_today"]))
+        days = body["days"]
+        if not isinstance(days, list):
+            return None
+    except Exception as e:
+        logger.warning("frost nights fetch failed for %s: %s", parcel_id, e)
+        return None
+
+    if body.get("missing_reasons"):
+        logger.warning(
+            "frost nights for %s have missing days: %s", parcel_id, body.get("missing_reasons")
+        )
+    nights: List[Night] = []
+    for d in days:
+        try:
+            kind = d["kind"]
+            if kind not in _FROST_KINDS:
+                continue
+            raw = d.get("tmin_c") if kind == "closed" else d.get("tmin_coldest_c")
+            tmin = float(raw) if raw is not None and not isinstance(raw, bool) else None
+            nights.append(Night(date.fromisoformat(str(d["date"])), tmin, kind))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue  # un día ilegible falta: decide_frost lo trata como sin dato
+    return FrostNights(nights, local_today, body.get("forecast_issued_at"))
 
 
 # ── Telemetry (TimescaleDB) ────────────────────────────────────────────

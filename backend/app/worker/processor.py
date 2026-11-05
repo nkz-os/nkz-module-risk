@@ -14,7 +14,7 @@ from nkz_platform_sdk import SyncOrionClient
 from app.alerts.contract import alert_entity_id, severity_for_score
 from app.config import get_settings
 from app.worker import alert_lifecycle as lifecycle
-from app.worker import sources, weather_source
+from app.worker import frost_alerts, sources, weather_source
 from app.worker.alert_publisher import publish_alert
 from app.worker.models.factory import RiskModelFactory
 from app.worker.models.threshold_model import series_requests
@@ -173,6 +173,33 @@ def _evaluate_crop_stress(
     return evaluated, errors
 
 
+def _evaluate_frost_risk(
+    orion, conn, settings, tenant_id, risk, existing, touched, now, parcel_filter,
+) -> Dict[str, int]:
+    """Aviso de helada por noche: una evaluación por parcela, aislada de las demás."""
+    counts = {"evaluated": 0, "errors": 0, "frost_no_data": 0}
+    for entity in _get_entities(orion, risk["target_sdm_type"]):
+        entity_id = entity.get("id")
+        if not entity_id or (parcel_filter and entity_id != parcel_filter):
+            continue
+        applicable = risk.get("applicable_crop_groups") or []
+        if applicable and _parcel_crop_group(orion, entity) not in applicable:
+            continue
+        try:
+            outcome = frost_alerts.process_frost_parcel(
+                orion, conn, settings, tenant_id, risk, entity, existing, touched, now
+            )
+        except Exception as e:
+            logger.error("frost eval tenant=%s parcel_id=%s: %s", tenant_id, entity_id, e)
+            counts["errors"] += 1
+            continue
+        if outcome == frost_alerts.PUBLISHED:
+            counts["evaluated"] += 1
+        elif outcome == frost_alerts.NO_DATA:
+            counts["frost_no_data"] += 1
+    return counts
+
+
 def _evaluate_risks(
     conn,
     tenant_id: str,
@@ -190,7 +217,7 @@ def _evaluate_risks(
     if not catalog:
         return {"evaluated": 0, "errors": 0}
 
-    evaluated = errors = 0
+    evaluated = errors = frost_no_data = 0
     now = datetime.now(timezone.utc)
     touched: Set[str] = set()
     with SyncOrionClient(tenant_id, base_url=settings.orion_ld_url, context_url=settings.context_url) as orion:
@@ -203,6 +230,14 @@ def _evaluate_risks(
             return {"evaluated": 0, "errors": 1}
 
         for risk in catalog:
+            if risk.get("model_type") == "frost":
+                fc = _evaluate_frost_risk(
+                    orion, conn, settings, tenant_id, risk, existing, touched, now, parcel_filter
+                )
+                evaluated += fc["evaluated"]
+                errors += fc["errors"]
+                frost_no_data += fc["frost_no_data"]
+                continue
             model = RiskModelFactory.create_model(
                 risk["alert_type"], risk["category"], risk["model_config"], risk["model_type"]
             )
@@ -284,7 +319,7 @@ def _evaluate_risks(
                 logger.error("Alert lifecycle sweep failed for %s: %s", tenant_id, e)
                 errors += 1
 
-    return {"evaluated": evaluated, "errors": errors}
+    return {"evaluated": evaluated, "errors": errors, "frost_no_data": frost_no_data}
 
 
 def evaluate_risks_for_tenant(conn, tenant_id: str) -> Dict[str, int]:

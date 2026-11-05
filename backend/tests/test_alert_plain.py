@@ -143,3 +143,33 @@ def test_friendly_free_text_passes_through():
     p = plain_for("x", "disease", "high", {"disease_name": "Roña"}, "Soto")
     for lang in ("es", "eu", "en"):
         assert "Roña" in p[lang]["title"]
+
+
+def _frost_data(night, lead, tmin):
+    return {"next_night": night, "next_lead": lead, "next_tmin_c": tmin}
+
+
+def test_frost_plain_tonight_and_dated_in_three_languages():
+    tonight = plain_for("frost", "agronomic", "high", _frost_data("2026-11-06", 1, 1.4), "Soto")
+    assert tonight["es"] == {"title": "Posible helada en Soto", "body": "Esta noche puede bajar a 1 °C."}
+    assert "Soto" in tonight["eu"]["title"] and "Soto" in tonight["en"]["title"]
+    assert "1 °C" in tonight["eu"]["body"] and tonight["en"]["body"].startswith("Tonight")
+    # Noche de D-1 a D con D = 2026-11-08: empieza el sábado 07/11.
+    dated = plain_for("frost", "agronomic", "low", _frost_data("2026-11-08", 3, -0.6), "Soto")
+    assert dated["es"]["body"] == "Noche del sábado 07/11: puede bajar a -1 °C."
+    assert dated["en"]["body"] == "Night of Saturday 07/11: it may drop to -1 °C."
+    assert dated["eu"]["body"] == "larunbata 07/11 gaua: -1 °C-ra jaitsi daiteke."
+    for lang in ("es", "eu", "en"):
+        assert "esta noche" not in dated[lang]["body"].lower()
+        assert "tonight" not in dated[lang]["body"].lower()
+
+
+def test_frost_plain_has_no_model_names_or_thresholds():
+    p = plain_for("frost", "agronomic", "high", _frost_data("2026-11-08", 3, 2.0), "Soto")
+    text = str(p).lower()
+    for banned in ("ecmwf", "open-meteo", "modelo", "umbral", "3.5", "3,5"):
+        assert banned not in text
+
+
+def test_frost_plain_without_night_data_keeps_previous_text():
+    assert plain_for("frost", "agronomic", "high", None, "Soto")["es"]["title"] == "Helada prevista en Soto"
