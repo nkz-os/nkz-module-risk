@@ -7,6 +7,7 @@
 import React, { useEffect, useState } from 'react';
 import { useViewer, useTranslation } from '@nekazari/sdk';
 import { SlotShell } from '@nekazari/viewer-kit';
+import { Checkbox } from '@nekazari/ui-kit';
 import { ShieldCheck } from 'lucide-react';
 import { useModuleApi, AlertItem, CatalogItem } from '../../services/api';
 
@@ -64,6 +65,47 @@ export const ParcelAlertsSlot: React.FC<{ className?: string }> = ({ className }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedEntityId]);
 
+  // null = lectura pendiente o fallida: el interruptor queda deshabilitado, sin valor supuesto.
+  const [frostVibrate, setFrostVibrate] = useState<boolean | null>(null);
+  const [settingError, setSettingError] = useState(false);
+  const [saving, setSaving] = useState(false);
+
+  useEffect(() => {
+    setFrostVibrate(null);
+    setSettingError(false);
+    if (!selectedEntityId) return;
+    let cancelled = false;
+    (async () => {
+      try {
+        const r = await api.getFrostVibrate(selectedEntityId);
+        if (!cancelled) setFrostVibrate(r.vibrate);
+      } catch {
+        if (!cancelled) setSettingError(true);
+      }
+    })();
+    return () => {
+      cancelled = true;
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedEntityId]);
+
+  const onFrostVibrateChange = async (checked: boolean) => {
+    if (!selectedEntityId || frostVibrate === null || saving) return;
+    const previous = frostVibrate;
+    setFrostVibrate(checked);
+    setSettingError(false);
+    setSaving(true);
+    try {
+      const r = await api.setFrostVibrate(selectedEntityId, checked);
+      setFrostVibrate(r.vibrate);
+    } catch {
+      setFrostVibrate(previous);
+      setSettingError(true);
+    } finally {
+      setSaving(false);
+    }
+  };
+
   return (
     <SlotShell moduleId="risk" title={t('context.title')} accent={moduleAccent} className={className}>
       {alerts.length === 0 ? (
@@ -92,6 +134,20 @@ export const ParcelAlertsSlot: React.FC<{ className?: string }> = ({ className }
             );
           })}
         </ul>
+      )}
+      {selectedEntityId && (
+        <div className="mt-3 border-t border-nkz-border pt-3">
+          <Checkbox
+            checked={frostVibrate ?? false}
+            disabled={frostVibrate === null || saving}
+            onChange={onFrostVibrateChange}
+            label={t('context.frostVibrate')}
+          />
+          <p className="mt-1 text-xs text-nkz-text-muted">{t('context.frostVibrateHelp')}</p>
+          {settingError && (
+            <p className="mt-1 text-xs text-nkz-danger-strong">{t('context.frostVibrateError')}</p>
+          )}
+        </div>
       )}
     </SlotShell>
   );
