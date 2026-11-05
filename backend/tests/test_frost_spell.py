@@ -276,3 +276,99 @@ def test_duplicate_null_never_overrides_value():
 
 def test_nan_tmin_in_near_window_is_no_data():
     assert _decide({2: float("nan")}).no_data
+
+
+def _on(day_offset, overrides, prev, today_offset=0):
+    """Evalúa en TODAY+today_offset con tmin absolutas por offset de día desde TODAY."""
+    today = TODAY + timedelta(days=today_offset)
+    ns = [
+        Night(today + timedelta(days=i), overrides.get(today_offset + i, WARM), "forecast")
+        for i in range(0, 8)
+    ]
+    return fs.decide_frost(ns, prev, CFG, today, False)
+
+
+def test_frost_beyond_gap_vibrates_when_near_even_if_prev_is_current():
+    for gap in (3, 4, 5, 6):
+        for prev_off in (0, 1, 2):
+            prev = SpellState(TODAY, TODAY + timedelta(days=prev_off), True, False, "near")
+            frost = prev_off + gap
+            vibes, cur = [], prev
+            for k in range(0, frost):
+                d = _on(0, {frost: 1.0}, cur, today_offset=k)
+                if d.no_data:
+                    continue
+                vibes.append(d.vibrate)
+                cur = d.spell
+                if (frost - k) <= CFG.near_nights:
+                    assert cur.vibrated and cur.last_night >= TODAY + timedelta(days=frost)
+            assert vibes.count(True) == 1, (gap, prev_off, vibes)
+
+
+def test_far_chain_does_not_replace_current_spell_until_near():
+    prev = SpellState(TODAY, TODAY + timedelta(days=1), True, False, "near")
+    d = _on(0, {6: 1.0}, prev)
+    assert d.stage == "far" and not d.vibrate and not d.new_spell
+    assert d.spell.start == prev.start and d.spell.last_night == prev.last_night
+    assert d.next_night.day == TODAY + timedelta(days=6)
+    near = _on(0, {6: 1.0}, d.spell, today_offset=2)  # lead 4
+    assert near.new_spell and near.vibrate and near.spell.start == TODAY + timedelta(days=6)
+
+
+def test_returned_earlier_night_does_not_open_new_spell():
+    prev = SpellState(TODAY + timedelta(days=3), TODAY + timedelta(days=3), True, False, "near")
+    d = _on(0, {1: 1.0, 3: 1.0}, prev)
+    assert not d.new_spell and not d.vibrate
+    assert d.spell.start == prev.start
+
+
+def test_last_night_does_not_cross_a_break():
+    prev = SpellState(TODAY, TODAY + timedelta(days=1), True, False, "near")
+    d = _on(0, {3: 1.0, 7: 1.0}, prev)
+    assert d.spell.last_night == TODAY + timedelta(days=3)
+    assert not d.new_spell and d.stage == "near"
+
+
+def _simulate(rng):
+    """Una secuencia de 30 días con varias evaluaciones al día; devuelve fallos."""
+    base = {d: (rng.uniform(-8.0, 3.0) if rng.random() < 0.25 else rng.uniform(6.0, 12.0)) for d in range(0, 45)}
+    prev, problems = None, []
+    credited: dict = {}
+    for day in range(0, 30):
+        today = TODAY + timedelta(days=day)
+        for _ in range(rng.randint(2, 5)):
+            ns = []
+            for i in range(0, 8):
+                if i > 0 and rng.random() < (0.08 if i <= CFG.near_nights else 0.25):
+                    continue  # noche retirada
+                v = base[day + i] + rng.uniform(-1.5, 1.5)
+                if i > 0 and rng.random() < 0.05:
+                    v = None
+                ns.append(Night(today + timedelta(days=i), v, "forecast"))
+            d = fs.decide_frost(ns, prev, CFG, today, False)
+            if d.no_data:
+                assert d.spell == prev and not d.vibrate
+                continue
+            prev = d.spell
+            for n in d.at_risk:
+                if (n.day - today).days <= CFG.near_nights:
+                    if not (d.spell and d.spell.vibrated and n.day <= d.spell.last_night):
+                        problems.append(("missed", day, n.day))
+            if d.vibrate:
+                # Se acredita a la racha que abre o continúa (su inicio la identifica).
+                credited.setdefault(d.spell.start, []).append((day, d.stage))
+    for key, evs in credited.items():
+        severe = sum(1 for _, st in evs if st == "severe")
+        if len(evs) - min(severe, 1) > 1 or len(evs) > 2:
+            problems.append(("double", key, evs))
+    return problems
+
+
+def test_property_no_missed_and_no_double_vibration():
+    import random
+
+    rng = random.Random(20261105)
+    bad = []
+    for _ in range(600):
+        bad.extend(_simulate(rng))
+    assert not bad, bad[:5]

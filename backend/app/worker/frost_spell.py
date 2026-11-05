@@ -191,27 +191,58 @@ def decide_frost(
     else:
         severity = "medium" if coldest.tmin_c <= 0.0 else "low"
 
-    first = chain_nights[0].day
-    # Racha nueva solo si la anterior ya pasó: mientras su última noche no ha
-    # pasado, una noche lejana no la sustituye (evita doble vibración por oscilación).
-    new_spell = prev is None or (
-        first > prev.last_night + timedelta(days=cfg.gap_nights) and prev.last_night < today
-    )
+    gap = timedelta(days=cfg.gap_nights)
 
-    chain_end = first
-    for n in chain_nights[1:]:
-        if (n.day - chain_end).days <= cfg.gap_nights:
-            chain_end = n.day
+    def chain_end_from(day: date) -> date:
+        end = day
+        for n in chain_nights:
+            if n.day <= end:
+                continue
+            if n.day - end <= gap:
+                end = n.day
+            else:
+                break
+        return end
+
+    # Se itera mientras queden cadenas sin cubrir que deban abrir racha: así una
+    # segunda helada cercana, separada por más de gap_nights, no espera a la
+    # siguiente evaluación para entrar en una racha.
+    state = prev
+    new_spell = False
+    while True:
+        if state is None:
+            first_new = at_risk[0]
+            opens = True
+            cursor = None
         else:
+            # Recorrido desde la última noche de la racha: nunca cruza un hueco
+            # mayor que gap_nights.
+            cursor = state.last_night
+            for n in chain_nights:
+                if n.day <= cursor + gap:
+                    cursor = max(cursor, n.day)
+                else:
+                    break
+            first_new = next((n for n in at_risk if n.day > cursor + gap), None)
+            if first_new is None:
+                opens = False
+            elif (first_new.day - today).days <= cfg.near_nights:
+                opens = True
+            else:
+                # Cadena lejana: abre racha solo cuando la cubierta ya ha pasado;
+                # si no, queda pendiente (el escalón y el aviso la siguen mostrando).
+                opens = cursor < today
+        if not opens:
             break
+        state = SpellState(first_new.day, chain_end_from(first_new.day), False, False, stage)
+        new_spell = True
 
     if new_spell:
-        start, last = first, chain_end
+        start, last = state.start, state.last_night
         was_vibrated = was_severe = False
     else:
-        start = prev.start
-        last = max(prev.last_night, chain_end)
-        was_vibrated, was_severe = prev.vibrated, prev.severe_vibrated
+        start, last = state.start, cursor
+        was_vibrated, was_severe = state.vibrated, state.severe_vibrated
 
     entering = stage in (STAGE_NEAR, STAGE_SEVERE)
     wants = (entering and not was_vibrated) or (stage == STAGE_SEVERE and not was_severe)
