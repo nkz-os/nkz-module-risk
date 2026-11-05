@@ -107,11 +107,24 @@ def _night_dict(n: Night, today: date) -> Dict[str, Any]:
     return {"day": n.day.isoformat(), "tmin_c": n.tmin_c, "lead": (n.day - today).days}
 
 
+def _text_night(decision: FrostDecision, cfg: FrostConfig, today: date) -> Night:
+    """Noche que nombra el texto: a escalón severo, la primera noche severa cercana."""
+    if decision.stage == STAGE_SEVERE:
+        for n in decision.at_risk:
+            if (n.day - today).days <= cfg.near_nights and n.tmin_c <= cfg.severe_c:
+                return n
+    return decision.next_night
+
+
 def _evaluation_data(
-    decision: FrostDecision, today: date, issued_at: Optional[str]
+    decision: FrostDecision, today: date, issued_at: Optional[str], cfg: FrostConfig
 ) -> Dict[str, Any]:
     nxt, cold, spell = decision.next_night, decision.coldest, decision.spell
+    text = _text_night(decision, cfg, today)
     return {
+        "text_night": text.day.isoformat(),
+        "text_tmin_c": text.tmin_c,
+        "text_lead": (text.day - today).days,
         "stage": decision.stage,
         "next_night": nxt.day.isoformat(),
         "next_tmin_c": nxt.tmin_c,
@@ -184,14 +197,6 @@ def process_frost_parcel(
 
     aid = frost_alert_id(tenant_id, entity_id, decision.spell.start)
 
-    # Una sola Alert activa por parcela: la de otra racha o la sin fecha se cierran
-    # antes de publicar la nueva.
-    for other, info in mine.items():
-        if other != aid and info["status"] == "active":
-            lifecycle.mark(orion, other, "resolved", now)
-            info["status"] = "resolved"
-            touched.add(other)
-
     current = existing.get(aid)
     if current is not None and current["status"] == "dismissed":
         shown = _read_spell(current, aid)
@@ -209,10 +214,27 @@ def process_frost_parcel(
         alert_type=ALERT_TYPE,
         category=risk.get("category") or "weather",
         severity=decision.severity,
-        evaluation_data=_evaluation_data(decision, fetched.today, fetched.issued_at),
+        evaluation_data=_evaluation_data(decision, fetched.today, fetched.issued_at, cfg),
         alert_id=aid,
         urgency="vibrate" if decision.vibrate else "silent",
     )
     if not ok:
         raise RuntimeError(f"frost publish rejected for {aid}")
+
+    # Una sola Alert activa por parcela: la de otra racha o la sin fecha se cierran
+    # DESPUÉS de publicar la nueva. Si cerrar falla, se registra y se reintenta en
+    # la siguiente pasada; no deshace el aviso nuevo.
+    for other, info in mine.items():
+        if other == aid or info["status"] != "active":
+            continue
+        try:
+            lifecycle.mark(orion, other, "resolved", now)
+        except Exception as e:
+            logger.error(
+                "frost resolve of old alert failed tenant=%s parcel_id=%s alert=%s: %s",
+                tenant_id, entity_id, other, e,
+            )
+            continue
+        info["status"] = "resolved"
+        touched.add(other)
     return PUBLISHED

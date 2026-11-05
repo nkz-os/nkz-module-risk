@@ -114,9 +114,11 @@ def _frost_night_info(evaluation_data: dict | None):
     """(día D de la noche, antelación, mínima redondeada) o None si falta algo."""
     data = evaluation_data or {}
     try:
-        night = date.fromisoformat(str(data["next_night"]))
-        lead = int(data["next_lead"])
-        tmin = data["next_tmin_c"]
+        # text_*: la noche que nombra el texto (a escalón severo, la severa).
+        pre = "text" if "text_night" in data else "next"
+        night = date.fromisoformat(str(data[f"{pre}_night"]))
+        lead = int(data[f"{pre}_lead"] if pre == "next" else data["text_lead"])
+        tmin = data[f"{pre}_tmin_c"]
         if isinstance(tmin, bool) or not math.isfinite(float(tmin)):
             return None
         return night, lead, int(math.floor(float(tmin) + 0.5))

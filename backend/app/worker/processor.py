@@ -227,7 +227,7 @@ def _evaluate_risks(
             # Sin el estado previo no se puede respetar un descarte: no se publica
             # nada antes que reabrir alertas que el usuario cerró.
             logger.error("Alert lifecycle: no se pudo leer el estado previo (%s); se omite el tenant", e)
-            return {"evaluated": 0, "errors": 1}
+            return {"evaluated": 0, "errors": 1, "frost_no_data": 0}
 
         for risk in catalog:
             if risk.get("model_type") == "frost":

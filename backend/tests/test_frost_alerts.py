@@ -367,3 +367,75 @@ def test_other_models_unchanged():
 def test_frost_removed_from_factory():
     from app.worker.models.factory import MODEL_TYPE_MAP
     assert "frost" not in MODEL_TYPE_MAP
+
+
+# ── ronda de correcciones ─────────────────────────────────────────────
+
+
+def test_failed_publish_keeps_previous_alert_active():
+    old_start = date(2026, 10, 20)
+    old = dated(old_start)
+    existing = {old: alert(observed="2026-10-25T10:00:00Z",
+                           spell=spell(old_start, last=date(2026, 10, 24)))}
+    touched = set()
+    orion = MagicMock()
+    with patch.object(fa.sources, "fetch_frost_nights", return_value=fetched({1: 1.0})), \
+            patch.object(fa, "publish_alert", return_value=False):
+        with pytest.raises(RuntimeError):
+            fa.process_frost_parcel(orion, conn_with(), SETTINGS, T, RISK,
+                                    {"id": PARCEL}, existing, touched, NOW)
+    orion.append_entity_attrs.assert_not_called()
+    assert existing[old]["status"] == "active"
+
+
+def test_failed_old_resolve_does_not_block_new_spell_or_vibration(caplog):
+    old_start = date(2026, 10, 20)
+    old = dated(old_start)
+    existing = {old: alert(observed="2026-10-25T10:00:00Z",
+                           spell=spell(old_start, last=date(2026, 10, 24)))}
+    touched = set()
+    orion = MagicMock()
+    orion.append_entity_attrs.side_effect = RuntimeError("orion down")
+    with caplog.at_level(logging.ERROR), \
+            patch.object(fa.sources, "fetch_frost_nights", return_value=fetched({1: 1.0})), \
+            patch.object(fa, "publish_alert", return_value=True) as pub:
+        out = fa.process_frost_parcel(orion, conn_with(), SETTINGS, T, RISK,
+                                      {"id": PARCEL}, existing, touched, NOW)
+    assert out == "published"
+    assert pub.call_args[1]["urgency"] == "vibrate"
+    assert existing[old]["status"] == "active"  # se reintenta en la siguiente pasada
+    assert any(old in r.getMessage() for r in caplog.records if r.levelno == logging.ERROR)
+
+
+def test_publish_happens_before_resolving_old():
+    order = []
+    old_start = date(2026, 10, 20)
+    existing = {dated(old_start): alert(observed="2026-10-25T10:00:00Z",
+                                        spell=spell(old_start, last=date(2026, 10, 24)))}
+    orion = MagicMock()
+    orion.append_entity_attrs.side_effect = lambda *a: order.append("resolve")
+    with patch.object(fa.sources, "fetch_frost_nights", return_value=fetched({1: 1.0})), \
+            patch.object(fa, "publish_alert", side_effect=lambda **k: order.append("publish") or True):
+        fa.process_frost_parcel(orion, conn_with(), SETTINGS, T, RISK, {"id": PARCEL},
+                                existing, set(), NOW)
+    assert order == ["publish", "resolve"]
+
+
+def test_severe_alert_text_names_the_severe_night():
+    # Noche 1 fría pero no severa (2 C); la severa (-6 C) es la del día 3.
+    _, _, pub, _ = run(fetched({1: 2.0, 3: -6.0}), {})
+    data = pub.call_args[1]["evaluation_data"]
+    assert data["stage"] == "severe"
+    assert data["next_night"] == "2026-11-06" and data["coldest_night"] == "2026-11-08"
+    assert data["text_night"] == "2026-11-08" and data["text_tmin_c"] == -6.0
+    from app.alerts.plain import plain_for
+    p = plain_for("frost", "agronomic", "critical", data, "Soto")
+    assert p["es"]["body"] == "Noche del sábado 07/11: puede bajar a -6 °C."
+    assert p["en"]["body"] == "Night of Saturday 07/11: it may drop to -6 °C."
+    assert p["eu"]["body"] == "larunbata 07/11 gaua: -6 °C-ra jaitsi daiteke."
+
+
+def test_non_severe_text_stays_on_next_night():
+    _, _, pub, _ = run(fetched({1: 2.0, 3: -1.0}), {})
+    data = pub.call_args[1]["evaluation_data"]
+    assert data["stage"] == "near" and data["text_night"] == data["next_night"] == "2026-11-06"
