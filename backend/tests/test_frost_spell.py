@@ -33,9 +33,9 @@ def _nights(overrides=None, upto=7, running=WARM):
     return out
 
 
-def _spell(start, last=None, status="active", stage="near", aid=None):
+def _spell(start, last=None, status="active", stage="near", aid=None, peak=None):
     last = start if last is None else last
-    return ExistingSpell(aid or f"a{start:%m%d}", status, start, last, stage)
+    return ExistingSpell(aid or f"a{start:%m%d}", status, start, last, stage, peak)
 
 
 def _decide(overrides=None, existing=(), muted=False, hour=NOON, running=WARM, upto=7):
@@ -281,8 +281,50 @@ def test_dismissed_alert_does_not_silence_a_separate_chain():
     assert ev.chains[1].alert_id is None and ev.chains[1].urgency == "vibrate"
 
 
+def test_dismissed_skips_only_while_every_trigger_night_is_inside_its_range():
+    d = _spell(D(1), last=D(2), status="dismissed")
+    assert _one(_decide({1: 1.0, 2: 1.0}, existing=[d])).skip
+    c = _one(_decide({1: 1.0, 2: 1.0, 4: 1.0}, existing=[d]))  # 4 une la cadena, fuera del rango
+    assert not c.skip and c.alert_id == d.alert_id and c.status == "dismissed"
+    assert c.text_night.day == D(4) and c.urgency == "vibrate"
+
+
+def test_dismissed_reopened_by_outside_nights_waits_for_them_in_quiet_hours():
+    # La noche descartada (lead 1) sería inminente por la tarde; la de fuera (lead 3), no.
+    d = _spell(D(1), status="dismissed")
+    c = _one(_decide({1: 1.0, 3: 1.0}, existing=[d], hour=23))
+    assert not c.skip and c.urgency == "silent" and c.text_night.day == D(3)
+    assert _one(_decide({1: 1.0, 3: 1.0}, existing=[d], hour=9)).urgency == "vibrate"
+
+
+def test_dismissed_reopened_by_a_stage_rise_keeps_the_normal_text():
+    d = _spell(D(1), status="dismissed", stage="near")
+    c = _one(_decide({1: -6.0}, existing=[d]))
+    assert not c.skip and c.text_night.day == D(1) and c.severity == "critical"
+
+
 def test_unmatched_dismissed_alert_is_left_alone():
     assert _decide(existing=[_spell(D(2), status="dismissed")]).resolve_ids == ()
+
+
+# ── severidad máxima de la Alert ──────────────────────────────────
+
+
+def test_published_severity_never_drops_below_the_alert_peak():
+    c = _one(_decide({2: 1.0}, existing=[_spell(D(2), peak="critical")]))
+    assert c.stage == "near" and c.severity == "critical" and c.text_night.day == D(2)
+    c = _one(_decide({6: 1.0}, existing=[_spell(D(6), stage="far", peak="high")]))
+    assert c.stage == "far" and c.severity == "high" and c.urgency == "silent"
+
+
+def test_peak_never_lowers_a_higher_current_severity():
+    assert _one(_decide({2: -6.0}, existing=[_spell(D(2), peak="high")])).severity == "critical"
+
+
+def test_new_alert_or_no_stored_peak_uses_the_current_severity():
+    assert _one(_decide({2: 1.0})).severity == "high"
+    assert _one(_decide({2: 1.0}, existing=[_spell(D(2))])).severity == "high"
+    assert _one(_decide({6: 1.0}, existing=[_spell(D(1), peak="critical")])).severity == "low"
 
 
 # ── histéresis ────────────────────────────────────────────────────────
@@ -368,19 +410,21 @@ def test_text_night_is_imminent_then_first_severe_then_next():
 
 
 def test_quiet_constants_are_named():
-    assert fs.QUIET_START == 22 and fs.QUIET_END == 8
+    assert fs.QUIET_START == 21 and fs.QUIET_END == 7
 
 
 def test_quiet_hours_hold_a_night_that_is_not_imminent():
-    for hour in (22, 23, 0, 3, 7):
+    for hour in (21, 22, 23, 0, 3, 6):
         assert _one(_decide({2: 1.0}, hour=hour)).urgency == "silent", hour
-    for hour in (8, 12, 18, 21):
+    for hour in (7, 12, 18, 20):
         assert _one(_decide({2: 1.0}, hour=hour)).urgency == "vibrate", hour
 
 
 def test_quiet_hours_lead_one_only_imminent_from_evening():
-    assert _one(_decide({1: 1.0}, hour=22)).urgency == "vibrate"
-    for hour in (0, 3, 7):
+    for hour in (21, 22, 23):
+        assert _one(_decide({1: 1.0}, hour=hour)).urgency == "vibrate", hour
+    assert _one(_decide({1: 1.0}, hour=7)).urgency == "vibrate"
+    for hour in (0, 3, 6):
         assert _one(_decide({1: 1.0}, hour=hour)).urgency == "silent", hour
 
 

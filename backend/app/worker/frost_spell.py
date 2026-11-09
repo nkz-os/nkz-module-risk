@@ -28,6 +28,9 @@ _STAGE_RANK = {STAGE_NONE: 0, STAGE_FAR: 1, STAGE_NEAR: 2, STAGE_SEVERE: 3}
 STAGES = frozenset(_STAGE_RANK)
 _VIBRATE_STAGES = (STAGE_NEAR, STAGE_SEVERE)
 
+_SEVERITY_RANK = {"low": 0, "medium": 1, "high": 2, "critical": 3}
+SEVERITIES = frozenset(_SEVERITY_RANK)
+
 URGENCY_VIBRATE = "vibrate"
 URGENCY_SILENT = "silent"
 
@@ -42,8 +45,8 @@ REASON_PARTIAL = "partial"
 RUNNING_NIGHT_UNTIL_HOUR = 10
 
 # Horas de silencio, en hora local. El owner puede cambiarlas.
-QUIET_START = 22
-QUIET_END = 8
+QUIET_START = 21
+QUIET_END = 7
 # Dentro de las horas de silencio solo vibra lo inminente: la noche en curso, o la de
 # mañana (lead 1) a partir de esta hora.
 IMMINENT_LEAD_1_FROM_HOUR = 18
@@ -78,6 +81,7 @@ class ExistingSpell:
     start: Optional[date]
     last_night: Optional[date]
     stage: str  # último escalón publicado
+    peak_severity: Optional[str] = None  # severidad más alta publicada con este id
 
 
 @dataclass(frozen=True)
@@ -87,7 +91,7 @@ class ChainDecision:
     start: date              # fija el id: el de la Alert emparejada, o la primera noche
     last_night: date
     stage: str               # far | near | severe
-    severity: str
+    severity: str            # publicada: nunca por debajo del pico de la Alert
     urgency: str
     nights: tuple[Night, ...]  # noches que disparan, por fecha
     next_night: Night
@@ -307,24 +311,37 @@ def _decide_chain(
     else:
         severity = "medium" if coldest.tmin_c <= 0.0 else "low"
 
-    imminent = [n for n in triggers if is_imminent(lead(n), local_hour)]
+    # La severidad publicada nunca baja mientras viva el id: notifications guarda una sola
+    # severidad por canal, y bajar de critical a high volvería a hacer vibrar.
+    if spell is not None and spell.peak_severity in _SEVERITY_RANK:
+        severity = max(severity, spell.peak_severity, key=_SEVERITY_RANK.__getitem__)
+
+    # Descartada: se salta mientras todas las noches de la cadena caigan en su rango y el
+    # escalón no suba. Si hay noches fuera, se trata como no descartada, y el texto y la
+    # inminencia salen de esas noches, como para una cadena nueva.
+    pool = triggers
+    skip = False
+    if spell is not None and spell.status == STATUS_DISMISSED and _dated(spell) \
+            and not should_reopen_dismissed(spell.stage, stage):
+        a, b = _span(spell)
+        outside = tuple(n for n in triggers if not a <= n.day <= b)
+        skip = not outside
+        pool = outside or triggers
+
+    imminent = [n for n in pool if is_imminent(lead(n), local_hour)]
+    severe = [n for n in pool if lead(n) <= cfg.near_nights and n.tmin_c <= cfg.severe_c]
     if imminent:
         text = imminent[0]
-    elif stage == STAGE_SEVERE:
-        text = next(n for n in triggers
-                    if lead(n) <= cfg.near_nights and n.tmin_c <= cfg.severe_c)
+    elif stage == STAGE_SEVERE and severe:
+        text = severe[0]
     else:
-        text = triggers[0]
+        text = pool[0]
 
     start = spell.start if spell is not None else chain[0].day
     # ASSUMPTION: last_night nunca queda antes de start. Una cadena que solo tiene noches
     # anteriores al inicio deja el rango en [start, start]: el id sigue siendo el de la
     # primera noche y ninguna cadena nueva puede nacer con ese mismo id.
     last = max(chain[-1].day, start)
-    skip = (
-        spell is not None and spell.status == STATUS_DISMISSED
-        and not should_reopen_dismissed(spell.stage, stage)
-    )
     return ChainDecision(
         alert_id=spell.alert_id if spell is not None else None,
         status=spell.status if spell is not None else None,

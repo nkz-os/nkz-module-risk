@@ -22,7 +22,7 @@ from app.worker import alert_lifecycle as lifecycle
 from app.worker import sources, weather_source
 from app.worker.alert_publisher import publish_alert
 from app.worker.frost_spell import (
-    STAGES, STATUS_ACTIVE, STATUS_DISMISSED, STATUS_RESOLVED, URGENCY_VIBRATE,
+    SEVERITIES, STAGES, STATUS_ACTIVE, STATUS_DISMISSED, STATUS_RESOLVED, URGENCY_VIBRATE,
     ChainDecision, ExistingSpell, FrostConfig, Night,
     config_from_model_config, decide_chains, keep_alive_ids,
 )
@@ -117,7 +117,10 @@ def _spells_of(mine: Dict[str, Dict[str, Any]]) -> List[ExistingSpell]:
                 continue
             out.append(ExistingSpell(aid, status, None, None, "none"))
         else:
-            out.append(ExistingSpell(aid, status, spell["start"], spell["last_night"], spell["stage"]))
+            data = info.get("evaluation_data") or {}
+            peak = data.get("peak_severity")
+            out.append(ExistingSpell(aid, status, spell["start"], spell["last_night"], spell["stage"],
+                                     peak if peak in SEVERITIES else None))
     return out
 
 
@@ -200,6 +203,7 @@ def _evaluation_data(
         "local_hour": local_hour,
         "publish_key": publish_key,
         "stage": chain.stage,
+        "peak_severity": chain.severity,
         "next_night": nxt.day.isoformat(),
         "next_tmin_c": nxt.tmin_c,
         "next_lead": (nxt.day - today).days,

@@ -85,7 +85,7 @@ def imminent_window(lead: int, hour: int) -> bool:
 
 
 def quiet(hour: int) -> bool:
-    return hour >= 22 or hour < 8
+    return hour >= 21 or hour < 7
 
 
 # ── broker y notifications falsos ────────────────────────────────────
@@ -288,9 +288,10 @@ def test_s1_alert_stays_through_the_dawn_and_closes_at_ten():
 
 
 def test_s1_stable_frost_does_not_wake_the_farmer_at_midnight():
+    # Horas de silencio 21:00-07:00: el primer push sale a las 07:15, a lead 4.
     t = drive(stable({FROST_DAY: 1.0}), 24 * 7)
     d = t.notifications.deliveries[0]
-    assert d.at.hour == 8 and (FROST_DAY - d.at.date()).days == 4
+    assert d.at.hour == 7 and (FROST_DAY - d.at.date()).days == 4
 
 
 def test_s2_cooling_after_midnight_warns_at_once_in_the_quiet_hours():
@@ -456,6 +457,79 @@ def test_a_parcel_can_hold_two_active_alerts_and_the_first_closing_leaves_the_se
     assert len(active(t.broker)) == 2
     t = drive(stable({early: 1.0, late: 1.0}), 24 + 3, start=START + timedelta(hours=8))
     assert [listed_nights(a) for a in active(t.broker)] == [{late}]
+
+
+# ── severidad: nunca baja mientras la Alert siga activa ──────────────
+
+
+@pytest.mark.parametrize("one_row", [False, True])
+def test_night_hovering_around_severe_pushes_high_then_critical_once(one_row):
+    # Noche a lead 3 oscilando ±0,3 °C en torno a -5 °C cada 3 h, desde las 08:15.
+    night = DAY0 + timedelta(days=3)
+
+    def f(now):
+        up = ((now - START).total_seconds() // (3 * 3600)) % 2
+        return stable({night: -5.0 + (0.3 if not up else -0.3)})(now)
+    t = drive(f, 24, start=START + timedelta(hours=8), one_row_per_channel=one_row)
+    assert [d.severity for d in t.notifications.deliveries] == ["high", "critical"]
+
+
+def test_severe_night_passing_keeps_the_alert_critical_with_the_current_text():
+    # 05/12 a -6 °C y 06/12 a 1 °C, estables: pasada la severa, el texto pasa a 06/12
+    # pero la severidad publicada sigue en critical, así que no hay tercer push.
+    t = drive(stable({DAY0 + timedelta(days=4): -6.0, DAY0 + timedelta(days=5): 1.0}),
+              24 * 6, start=START + timedelta(hours=8), one_row_per_channel=True)
+    assert [d.severity for d in t.notifications.deliveries] == ["critical"]
+    (alert,) = active(t.broker) or [None]
+    assert alert is None or alert["severity"]["value"] == "critical"
+
+
+def test_peak_severity_resets_with_a_new_alert_id():
+    early, late = DAY0 + timedelta(days=1), DAY0 + timedelta(days=5)
+    t = drive(stable({early: -6.0, late: 1.0}), 24 * 3, start=START + timedelta(hours=8),
+              one_row_per_channel=True)
+    sev = {d.alert_id[-8:]: d.severity for d in t.notifications.deliveries}
+    assert sev == {"20261202": "critical", "20261206": "high"}
+
+
+# ── descartes ────────────────────────────────────────────────────────
+
+
+def _dismiss_at(when: datetime):
+    def after(now, broker, notifications, outcome):
+        if now == when:
+            for aid, e in broker.e.items():
+                if e["status"]["value"] == "active":
+                    broker.append_entity_attrs(aid, {"status": {"type": "Property", "value": "dismissed"}})
+    return after
+
+
+def test_dismissed_frost_bridged_to_a_later_one_still_warns_ahead_of_it():
+    # 03/12 avisada y descartada; 06/12 aparece en horas de silencio; 05/12 une las dos.
+    n1, bridge, n2 = DAY0 + timedelta(days=2), DAY0 + timedelta(days=4), DAY0 + timedelta(days=5)
+
+    def f(now):
+        cold = {n1: 1.0}
+        if now >= START + timedelta(hours=23):
+            cold[n2] = 1.0
+        if now >= START + timedelta(hours=26):
+            cold[bridge] = 1.0
+        return stable(cold)(now)
+    t = drive(f, 24 * 6, after_run=_dismiss_at(START + timedelta(hours=10)))
+    later = [d for d in t.notifications.deliveries if d.at > START + timedelta(hours=10)]
+    night_start = datetime.combine(n2 - timedelta(days=1), datetime.min.time(), timezone.utc)
+    assert later and later[0].at < night_start, [(d.at, d.body) for d in later]
+    d = later[0]
+    lead = (min(d.nights - {n1}) - d.at.date()).days
+    assert not quiet(d.at.hour) or lead == 0 or (lead == 1 and d.at.hour >= 18)
+    assert "03/12" not in d.body and "02/12" not in d.body  # no vuelve a nombrar la descartada
+
+
+def test_dismissed_frost_stays_silent_while_its_chain_keeps_to_its_nights():
+    n1 = DAY0 + timedelta(days=2)
+    t = drive(stable({n1: 1.0}), 24 * 2, after_run=_dismiss_at(START + timedelta(hours=10)))
+    assert len(t.notifications.deliveries) == 1
+    assert {o for _, o in t.outcomes[11:]} <= {"skipped", "resolved", "none"}
 
 
 # ── (c) una noche que oscila en torno al umbral ──────────────────────
@@ -665,8 +739,9 @@ def test_property_a_every_frost_night_gets_a_delivered_vibrate_by_its_window(one
     assert not (bad := _violations_of("missed", one_row_per_channel=one_row)), bad[:5]
 
 
-def test_property_b_at_most_one_delivery_per_id_and_severity_between_closes():
-    assert not (bad := _violations_of("double_id")), bad[:5]
+@pytest.mark.parametrize("one_row", [False, True])
+def test_property_b_at_most_one_delivery_per_id_and_severity_between_closes(one_row):
+    assert not (bad := _violations_of("double_id", one_row_per_channel=one_row)), bad[:5]
 
 
 def test_property_the_oracle_is_not_vacuous():
@@ -685,12 +760,14 @@ def _stable_random(seed: int, days: int = 10):
     return stable(cold)
 
 
+@pytest.mark.parametrize("one_row", [False, True])
 @pytest.mark.parametrize("failure_rate", [0.0, 0.3])
-def test_property_d_stable_forecast_pushes_at_most_twice_per_alert_and_respects_quiet_hours(failure_rate):
+def test_property_d_stable_forecast_pushes_at_most_twice_per_alert_and_respects_quiet_hours(
+        failure_rate, one_row):
     for seed in range(60):
         fail_rng = random.Random(seed + 1)
         t = drive(_stable_random(20261105 + seed), 24 * 10,
-                  fail=lambda: fail_rng.random() < failure_rate)
+                  fail=lambda: fail_rng.random() < failure_rate, one_row_per_channel=one_row)
         per_id = Counter(d.alert_id for d in t.notifications.deliveries)
         assert max(per_id.values(), default=0) <= 2, (seed, per_id)
         for d in t.notifications.deliveries:

@@ -857,8 +857,21 @@ def test_round_trip_two_runs_no_second_publish_keeps_spell():
     info = existing[aid]
     assert info["ref_entity"] == PARCEL and info["status"] == "active"
     assert fa._spells_of(fa._frost_alerts_of(existing, PARCEL)) == [
-        fs.ExistingSpell(aid, "active", date(2026, 11, 8), date(2026, 11, 8), "near")]
+        fs.ExistingSpell(aid, "active", date(2026, 11, 8), date(2026, 11, 8), "near", "high")]
     assert lc._parse(info["observed_at"]) == NOW
+
+
+def test_round_trip_peak_severity_survives_a_drop_in_stage():
+    broker = _NormalizedOrion()
+    _roundtrip_run(broker, fetched({3: -6.0}), NOW)
+    aid = dated(date(2026, 11, 8))
+    assert broker.entities[aid]["severity"]["value"] == "critical"
+    out, _, _ = _roundtrip_run(broker, fetched({3: 1.0}), NOW + timedelta(hours=1))
+    e = broker.entities[aid]
+    assert out == "published" and e["evaluationData"]["value"]["stage"] == "near"
+    assert e["severity"]["value"] == "critical"
+    assert e["evaluationData"]["value"]["peak_severity"] == "critical"
+    assert e["plain"]["value"]["es"]["body"] == "Noche del sábado 07/11: puede bajar a 1 °C."
 
 
 def test_round_trip_two_active_alerts_over_runs_without_a_second_write():
