@@ -6,13 +6,15 @@ Todo vía SDK (SyncOrionClient) o psycopg2 — nunca requests crudo a Orion.
 """
 import logging
 import os
-from typing import Any, Dict, List, Optional
+from datetime import date, datetime, timedelta, timezone
+from typing import Any, Dict, List, NamedTuple, Optional
 
 import requests
 from nkz_platform_sdk.crypto import generate_hmac_signature
 
 from app.worker import weather_source
 from app.worker.crop_cycles import accumulation_start
+from app.worker.frost_spell import Night
 
 logger = logging.getLogger(__name__)
 
@@ -159,6 +161,101 @@ def fetch_weather_alerts(weather_api_url: str, tenant_id: str, parcel_id: str) -
     except Exception as e:
         logger.debug("weather-alerts fetch failed for %s: %s", parcel_id, e)
     return []
+
+
+# ── Noches de helada (weather-api /daily) ──────────────────────────────
+
+
+class FrostNights(NamedTuple):
+    """Noches de la previsión y la fecha local de la parcela que las ancla."""
+    nights: List[Night]
+    today: date
+    issued_at: Optional[str]
+    local_hour: int
+
+
+class WeatherOutage(Exception):
+    """weather-api no responde (transporte o 5xx). Cuenta para el freno por tenant."""
+
+
+_FROST_KINDS = {"closed", "running", "forecast"}
+
+
+def fetch_frost_nights(
+    weather_api_url: str,
+    tenant_id: str,
+    parcel_id: str,
+    horizon_nights: int,
+    timeout: float = 30,
+) -> Optional[FrostNights]:
+    """Noches (día D = noche de D-1 a D) de /daily, o None si no hay dato fiable.
+
+    None = sin dato, nunca «sin riesgo»: respuesta 4xx, cuerpo ilegible o sin
+    `local_today` o `local_now` (un weather-api anterior no los envía). Un fallo de
+    transporte o un 5xx lanza `WeatherOutage`. `Night.tmin_c` es la mínima más fría de
+    dos modelos en los días `running`/`forecast`, y la mínima medida en los cerrados; un
+    día de previsión sin esa mínima queda en None y nunca cae a `tmin_c`.
+
+    Sin relleno de días pasados: la decisión no los usa, y rellenarlos gastaría el
+    presupuesto de tiempo de la previsión. `start`/`end` son obligatorios: un día.
+    """
+    yesterday = (datetime.now(timezone.utc).date() - timedelta(days=1)).isoformat()
+    params = {
+        "start": yesterday,
+        "end": yesterday,
+        "fill": "none",
+        "forecast_days": horizon_nights,
+    }
+    try:
+        resp = requests.get(
+            f"{weather_api_url}/api/weather/parcel/{parcel_id}/daily",
+            params=params,
+            headers=_weather_api_headers(tenant_id),
+            timeout=timeout,
+        )
+    except OSError as e:  # incluye requests.RequestException: transporte y tiempo agotado
+        raise WeatherOutage(str(e)) from e
+    except Exception as e:
+        logger.warning("frost nights request failed for %s: %s", parcel_id, e)
+        return None
+    if resp.status_code >= 500:
+        raise WeatherOutage(f"status {resp.status_code}")
+    try:
+        if resp.status_code != 200:
+            logger.warning(
+                "frost nights fetch %s for %s: %s",
+                resp.status_code, parcel_id, resp.text[:200],
+            )
+            return None
+        body = resp.json()
+        local_today = date.fromisoformat(str(body["local_today"]))
+        local_hour = datetime.fromisoformat(str(body["local_now"])).hour
+        days = body["days"]
+        if not isinstance(days, list):
+            return None
+    except Exception as e:
+        logger.warning("frost nights fetch failed for %s: %s", parcel_id, e)
+        return None
+
+    # Solo importan los huecos de la previsión; un día pasado sin fila avisaría cada hora.
+    gaps = [
+        day for day, reason in (body.get("missing_reasons") or {}).items()
+        if reason == "forecast_unavailable"
+    ]
+    if gaps:
+        logger.warning("frost nights for %s have forecast gaps: %s", parcel_id, gaps)
+    nights: List[Night] = []
+    for d in days:
+        try:
+            kind = d["kind"]
+            if kind not in _FROST_KINDS:
+                continue
+            raw = d.get("tmin_c") if kind == "closed" else d.get("tmin_coldest_c")
+            tmin = float(raw) if raw is not None and not isinstance(raw, bool) else None
+            nights.append(Night(date.fromisoformat(str(d["date"])), tmin, kind))
+        except (KeyError, TypeError, ValueError, AttributeError):
+            continue  # un día ilegible falta: decide_chains lo trata como sin dato
+    return FrostNights(nights, local_today, body.get("forecast_issued_at"), local_hour)
 
 
 # ── Telemetry (TimescaleDB) ────────────────────────────────────────────

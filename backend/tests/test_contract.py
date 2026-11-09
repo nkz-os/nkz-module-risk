@@ -30,3 +30,19 @@ def test_build_alert_entity():
     assert e["probabilityScore"]["value"] == 82.5
     assert e["refEntity"]["object"] == "urn:ngsi-ld:AgriParcel:abc"
     assert e["status"]["value"] == "active"
+
+
+def test_frost_alert_id_appends_start_date():
+    from datetime import date
+    from app.alerts.contract import frost_alert_id
+    assert frost_alert_id("t1", "urn:ngsi-ld:AgriParcel:abc", date(2026, 11, 6)) == \
+        "urn:ngsi-ld:Alert:t1:frost:abc:20261106"
+
+
+def test_build_alert_entity_explicit_id():
+    e = build_alert_entity(
+        tenant_id="t1", entity_id="urn:ngsi-ld:AgriParcel:abc", entity_type="AgriParcel",
+        alert_type="frost", category=AlertCategory.WEATHER, severity=AlertSeverity.LOW,
+        context_url="http://ctx", alert_id="urn:ngsi-ld:Alert:t1:frost:abc:20261106",
+    )
+    assert e["id"].endswith(":20261106")

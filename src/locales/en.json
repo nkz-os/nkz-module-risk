@@ -62,7 +62,10 @@
   "subtitle": "Risks and alerts for your parcels",
   "context": {
     "title": "Parcel alerts",
-    "empty": "No alerts for this entity"
+    "empty": "No alerts for this entity",
+    "frostVibrate": "Vibrate phone for frost alerts",
+    "frostVibrateHelp": "If you turn this off, you stop getting the immediate frost notice for this parcel. The notice stays in the app and the daily summary.",
+    "frostVibrateError": "Could not load or save the setting"
   },
   "widget": {
     "title": "Recent alerts",

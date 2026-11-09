@@ -75,9 +75,16 @@ export function useModuleApi() {
   });
 
   return {
-    getAlerts: () => client.get<{ alerts: AlertItem[]; count: number }>('/alerts'),
+    getAlerts: (status?: 'active' | 'resolved' | 'expired' | 'dismissed' | 'all') =>
+      client.get<{ alerts: AlertItem[]; count: number }>(
+        status ? `/alerts?status=${encodeURIComponent(status)}` : '/alerts',
+      ),
     dismissAlert: (id: string) =>
       client.post<{ id: string; status: string }>(`/alerts/${encodeURIComponent(id)}/dismiss`, {}),
+    getFrostVibrate: (parcelId: string) =>
+      client.get<{ vibrate: boolean }>(`/parcels/${encodeURIComponent(parcelId)}/alert-settings/frost`),
+    setFrostVibrate: (parcelId: string, vibrate: boolean) =>
+      client.put<{ vibrate: boolean }>(`/parcels/${encodeURIComponent(parcelId)}/alert-settings/frost`, { vibrate }),
     getCatalog: () => client.get<CatalogItem[]>('/catalog'),
     getSubscriptions: () => client.get<Subscription[]>('/subscriptions'),
     createSubscription: (d: Partial<Subscription>) => client.post<Subscription>('/subscriptions', d),

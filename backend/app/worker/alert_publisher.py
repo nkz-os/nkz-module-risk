@@ -44,6 +44,8 @@ def publish_alert(
     probability_score: float | None = None,
     evaluation_data: dict | None = None,
     confidence: float = 1.0,
+    alert_id: str | None = None,
+    urgency: str | None = None,
 ) -> bool:
     """Construye y publica un Alert. Devuelve True si Orion lo aceptó."""
     cat = category if isinstance(category, AlertCategory) else AlertCategory(category)
@@ -54,13 +56,15 @@ def publish_alert(
         entity = _build(
             tenant_id, entity_id, entity_type, alert_type, cat, sev,
             probability_score, evaluation_data, confidence, context_url, parcel_name,
+            alert_id, urgency,
         )
         result = client.upsert_entities_batch([entity])
     return _finish(result, alert_type, entity_id)
 
 
 def _build(tenant_id, entity_id, entity_type, alert_type, cat, sev,
-           probability_score, evaluation_data, confidence, context_url, parcel_name):
+           probability_score, evaluation_data, confidence, context_url, parcel_name,
+           alert_id=None, urgency=None):
     return build_alert_entity(
         tenant_id=tenant_id,
         entity_id=entity_id,
@@ -73,7 +77,8 @@ def _build(tenant_id, entity_id, entity_type, alert_type, cat, sev,
         confidence=confidence,
         context_url=context_url,
         plain=plain_for(alert_type, cat.value, sev.value, evaluation_data, parcel_name),
-        urgency=urgency_for(cat, sev, alert_type),
+        urgency=urgency or urgency_for(cat, sev, alert_type),
+        alert_id=alert_id,
         action=action_for(entity_id, entity_type),
     )
 

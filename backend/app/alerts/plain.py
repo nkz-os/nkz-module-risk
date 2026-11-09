@@ -4,6 +4,9 @@ Funciones puras. Sin jerga ni unidades técnicas: el texto lo lee un agricultor.
 """
 from __future__ import annotations
 
+import math
+from datetime import date, timedelta
+
 _HIGH = {"high", "critical"}
 _WEATHER_TYPES = {
     "frost", "heat_stress", "hail_proxy", "wind_damage", "fire_30_30_30", "weather_alert",
@@ -79,6 +82,91 @@ _TEXTS: dict[str, dict[str, tuple[str, str]]] = {
 }
 
 
+# Aviso de helada por noche. Sin nombres de modelo ni umbrales. La mínima es la más
+# fría de dos modelos, así que el texto dice "puede bajar", nunca "bajará".
+# ASSUMPTION: los textos y días de la semana en eu son míos; revisar con hablante nativo.
+_FROST_TITLE = {
+    "es": "Posible helada en {parcel}",
+    "eu": "Izotza izan daiteke {parcel} lursailean",
+    "en": "Possible frost in {parcel}",
+}
+_FROST_BODY = {
+    "frost_dawn": {
+        "es": "Esta madrugada puede bajar a {tmin} °C.",
+        "eu": "Gaur goizaldean {tmin} °C-ra jaitsi daiteke.",
+        "en": "Early this morning it may drop to {tmin} °C.",
+    },
+    "frost_tonight": {
+        "es": "Esta noche puede bajar a {tmin} °C.",
+        "eu": "Gaur gauean {tmin} °C-ra jaitsi daiteke.",
+        "en": "Tonight it may drop to {tmin} °C.",
+    },
+    "frost_night": {
+        "es": "Noche del {weekday} {date}: puede bajar a {tmin} °C.",
+        "eu": "{weekday} {date} gaua: {tmin} °C-ra jaitsi daiteke.",
+        "en": "Night of {weekday} {date}: it may drop to {tmin} °C.",
+    },
+}
+# Lunes = 0, como date.weekday().
+_WEEKDAYS = {
+    "es": ("lunes", "martes", "miércoles", "jueves", "viernes", "sábado", "domingo"),
+    "eu": ("astelehena", "asteartea", "asteazkena", "osteguna", "ostirala", "larunbata", "igandea"),
+    "en": ("Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday", "Sunday"),
+}
+
+
+# Antes de esta hora local, «esta noche» se leería como la noche que aún está en curso.
+_TONIGHT_FROM_HOUR = 6
+
+
+def round_tmin(tmin: float) -> int:
+    """Mínima tal y como la lee el agricultor: grados enteros, .5 hacia arriba."""
+    return int(math.floor(float(tmin) + 0.5))
+
+
+def frost_body_key(lead: int, local_hour: int | None) -> str:
+    """Forma del texto. Sin hora conocida, la fechada, que nunca dice «esta noche» en falso."""
+    if lead == 0:
+        return "frost_dawn"
+    if lead == 1 and local_hour is not None and local_hour >= _TONIGHT_FROM_HOUR:
+        return "frost_tonight"
+    return "frost_night"
+
+
+def _frost_night_info(evaluation_data: dict | None):
+    """(día D de la noche, antelación, mínima redondeada, hora local) o None si falta algo."""
+    data = evaluation_data or {}
+    try:
+        # text_*: la noche que nombra el texto (a escalón severo, la severa).
+        pre = "text" if "text_night" in data else "next"
+        night = date.fromisoformat(str(data[f"{pre}_night"]))
+        lead = int(data[f"{pre}_lead"] if pre == "next" else data["text_lead"])
+        tmin = data[f"{pre}_tmin_c"]
+        if isinstance(tmin, bool) or not math.isfinite(float(tmin)):
+            return None
+        hour = data.get("local_hour")
+        return night, lead, round_tmin(tmin), hour if isinstance(hour, int) else None
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+def _frost_plain(parcel: str, info) -> dict:
+    night, lead, tmin, hour = info
+    start = night - timedelta(days=1)  # la noche empieza el día anterior a D
+    key = frost_body_key(lead, hour)
+    out = {}
+    for lang, title in _FROST_TITLE.items():
+        out[lang] = {
+            "title": title.format(parcel=parcel),
+            "body": _FROST_BODY[key][lang].format(
+                tmin=tmin,
+                weekday=_WEEKDAYS[lang][start.weekday()],
+                date=f"{start:%d/%m}",
+            ),
+        }
+    return out
+
+
 def _val(x) -> str:
     return str(getattr(x, "value", x) or "")
 
@@ -128,6 +216,10 @@ def _key(alert_type: str, category: str, severity: str, has_disease: bool) -> st
 
 def plain_for(alert_type, category, severity, evaluation_data, parcel_name) -> dict:
     """Siempre devuelve {es, eu, en}, cada uno con title y body."""
+    if _val(alert_type) == "frost":
+        info = _frost_night_info(evaluation_data)
+        if info is not None:
+            return _frost_plain((parcel_name or "").strip() or "la parcela", info)
     names = _disease_names(evaluation_data)
     key = _key(_val(alert_type), _val(category), _val(severity), names is not None)
     parcel = (parcel_name or "").strip() or "la parcela"

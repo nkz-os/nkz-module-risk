@@ -15,7 +15,6 @@ try:
     from .robotic_model import RoboticRiskModel
     from .energy_model import EnergyRiskModel
     from .spray_suitability_model import SpraySuitabilityRiskModel
-    from .frost_model import FrostRiskModel
     from .wind_spray_model import WindSprayRiskModel
     from .water_stress_model import WaterStressRiskModel
     from .gdd_pest_model import GDDPestRiskModel
@@ -28,7 +27,6 @@ except ImportError as e:
     RoboticRiskModel = None
     EnergyRiskModel = None
     SpraySuitabilityRiskModel = None
-    FrostRiskModel = None
     WindSprayRiskModel = None
     WaterStressRiskModel = None
     GDDPestRiskModel = None
@@ -39,7 +37,6 @@ except ImportError as e:
 # Models dispatched by model_type (takes precedence over domain mapping)
 MODEL_TYPE_MAP = {
     'spray_suitability': SpraySuitabilityRiskModel,
-    'frost': FrostRiskModel,
     'wind_spray': WindSprayRiskModel,
     'water_stress': WaterStressRiskModel,
     'gdd_pest': GDDPestRiskModel,

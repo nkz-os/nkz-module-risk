@@ -1,5 +1,5 @@
 """Congela el contrato de la entidad Alert (SDM) para el módulo risk."""
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from enum import Enum
 
 ALERT_TYPE = "Alert"
@@ -35,16 +35,20 @@ def alert_entity_id(tenant_id: str, alert_type: str, entity_id: str) -> str:
     short = entity_id.rsplit(":", 1)[-1] if ":" in entity_id else entity_id
     return f"urn:ngsi-ld:Alert:{tenant_id}:{alert_type}:{short}"
 
+def frost_alert_id(tenant_id: str, entity_id: str, start: date) -> str:
+    """Id de la Alert de helada de una racha: el id de siempre más la fecha de inicio."""
+    return f"{alert_entity_id(tenant_id, 'frost', entity_id)}:{start:%Y%m%d}"
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat().replace("+00:00", "Z")
 
 def build_alert_entity(*, tenant_id, entity_id, entity_type, alert_type,
                        category, severity, probability_score=None,
                        evaluation_data=None, confidence=1.0, context_url,
-                       plain=None, urgency=None, action=None) -> dict:
+                       plain=None, urgency=None, action=None, alert_id=None) -> dict:
     e = {
         "@context": context_url,
-        "id": alert_entity_id(tenant_id, alert_type, entity_id),
+        "id": alert_id or alert_entity_id(tenant_id, alert_type, entity_id),
         "type": ALERT_TYPE,
         "category": {"type": "Property", "value": category.value},
         "alertType": {"type": "Property", "value": alert_type},
