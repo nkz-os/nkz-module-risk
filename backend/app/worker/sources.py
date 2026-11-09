@@ -254,7 +254,7 @@ def fetch_frost_nights(
             tmin = float(raw) if raw is not None and not isinstance(raw, bool) else None
             nights.append(Night(date.fromisoformat(str(d["date"])), tmin, kind))
         except (KeyError, TypeError, ValueError, AttributeError):
-            continue  # un día ilegible falta: decide_frost lo trata como sin dato
+            continue  # un día ilegible falta: decide_chains lo trata como sin dato
     return FrostNights(nights, local_today, body.get("forecast_issued_at"), local_hour)
 
 

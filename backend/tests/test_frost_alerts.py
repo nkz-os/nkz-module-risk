@@ -10,6 +10,7 @@ import requests
 from app.worker import alert_lifecycle as lc
 from app.worker import frost_alerts as fa
 from app.worker import sources
+from app.worker import frost_spell as fs
 from app.worker.frost_spell import Night
 
 NOW = datetime(2026, 11, 5, 12, 0, tzinfo=timezone.utc)
@@ -60,9 +61,8 @@ def alert(status="active", observed="2026-11-05T10:00:00Z", spell=None, ref=PARC
             "ref_entity": ref, "observed_at": observed, "evaluation_data": data}
 
 
-def spell(start, last=None, vibrated=True, severe=False, stage="near"):
-    return {"start": start.isoformat(), "last_night": (last or start).isoformat(),
-            "vibrated": vibrated, "severe_vibrated": severe, "stage": stage}
+def spell(start, last=None, stage="near"):
+    return {"start": start.isoformat(), "last_night": (last or start).isoformat(), "stage": stage}
 
 
 def dated(start):
@@ -250,7 +250,7 @@ def test_frost_returning_after_a_resolve_vibrates_again_on_the_same_id():
     start = date(2026, 11, 6)
     aid = dated(start)
     existing = {aid: alert(status="resolved",
-                           spell=spell(start, vibrated=True, stage="near"))}
+                           spell=spell(start, stage="near"))}
     out, orion, pub, _ = run(fetched({2: 1.0}), existing)
     assert out == "published"
     kw = pub.call_args[1]
@@ -272,7 +272,7 @@ def test_malformed_spell_is_prev_none_with_warning(caplog):
 def test_dismissed_far_reopens_when_near():
     start = date(2026, 11, 9)  # lead 4 es cercano; la racha empezó lejana
     aid = dated(start)
-    existing = {aid: alert(status="dismissed", spell=spell(start, vibrated=False, stage="far"))}
+    existing = {aid: alert(status="dismissed", spell=spell(start, stage="far"))}
     out, _, pub, _ = run(fetched({4: 1.0}), existing)
     assert out == "published"
     assert pub.call_args[1]["alert_id"] == aid and pub.call_args[1]["urgency"] == "vibrate"
@@ -301,15 +301,16 @@ def test_dismissed_then_new_spell_vibrates():
 # ── vibración ─────────────────────────────────────────────────────────
 
 
-def test_near_keeps_sending_vibrate_after_the_spell_flag_is_set():
+def test_near_keeps_sending_vibrate_on_every_publish():
     # Notifications deduplica por (id, severidad) y solo anota lo enviado: repetir
     # `vibrate` reintenta un push fallido y no vuelve a vibrar tras el éxito.
     start = date(2026, 11, 7)
     aid = dated(start)
-    existing = {aid: alert(observed="2026-11-05T05:00:00Z", spell=spell(start, vibrated=True))}
+    existing = {aid: alert(observed="2026-11-05T05:00:00Z", spell=spell(start))}
     out, _, pub, _ = run(fetched({2: 1.0}), existing)
     assert out == "published" and pub.call_args[1]["urgency"] == "vibrate"
-    assert pub.call_args[1]["evaluation_data"]["spell"]["vibrated"] is True
+    assert pub.call_args[1]["evaluation_data"]["spell"] == {
+        "start": "2026-11-07", "last_night": "2026-11-07", "stage": "near"}
 
 
 def test_running_night_before_ten_publishes_this_dawn():
@@ -354,7 +355,7 @@ def test_settings_read_failure_keeps_vibration_on(caplog):
     assert any(r.levelno == logging.ERROR for r in caplog.records)
 
 
-def test_failed_publish_does_not_mark_vibrated():
+def test_failed_publish_does_not_advance_state():
     existing = {}
     with pytest.raises(RuntimeError):
         run(fetched({1: 1.0}), existing, publish_ok=False)
@@ -446,14 +447,15 @@ def test_no_data_keeps_alert_while_its_night_is_ahead():
         assert not orion.append_entity_attrs.called and not pub.called
 
 
-def test_no_data_keeps_only_the_latest_active():
-    old, new = dated(date(2026, 11, 1)), dated(date(2026, 11, 7))
+def test_no_data_keeps_every_active_alert_whose_night_is_ahead():
+    a, b, past = dated(date(2026, 11, 6)), dated(date(2026, 11, 10)), dated(date(2026, 11, 1))
     existing = {
-        old: alert(observed="2026-11-01T10:00:00Z", spell=spell(date(2026, 11, 7))),
-        new: alert(observed="2026-11-05T10:00:00Z", spell=spell(date(2026, 11, 7))),
+        a: alert(observed="2026-11-01T10:00:00Z", spell=spell(date(2026, 11, 6))),
+        b: alert(observed="2026-11-05T10:00:00Z", spell=spell(date(2026, 11, 10))),
+        past: alert(observed="2026-11-01T10:00:00Z", spell=spell(date(2026, 11, 1))),
     }
     _, _, _, touched = run(None, existing)
-    assert touched == {new}
+    assert touched == {a, b}
 
 
 def test_no_data_ignores_resolved_alert_and_other_parcels():
@@ -470,7 +472,7 @@ def test_no_data_ignores_resolved_alert_and_other_parcels():
 def test_no_data_partial_keeps_alert_and_logs_reason(caplog):
     start = date(2026, 11, 11)  # lead 6
     aid = dated(start)
-    existing = {aid: alert(spell=spell(start, vibrated=False, stage="far"))}
+    existing = {aid: alert(spell=spell(start, stage="far"))}
     with caplog.at_level(logging.ERROR):
         out, orion, _, touched = run(fetched({5: None, 6: None, 7: None}), existing)
     assert out == "no_data" and not orion.append_entity_attrs.called and aid in touched
@@ -843,7 +845,8 @@ def test_round_trip_two_runs_no_second_publish_keeps_spell():
     aid = dated(date(2026, 11, 8))
     written = broker.entities[aid]
     assert written["observedAt"]["type"] == "Property"
-    assert written["evaluationData"]["value"]["spell"]["vibrated"] is True
+    assert written["evaluationData"]["value"]["spell"] == {
+        "start": "2026-11-08", "last_night": "2026-11-08", "stage": "near"}
 
     before = json.dumps(broker.entities[aid], sort_keys=True)
     out, existing, touched = _roundtrip_run(broker, f, NOW + timedelta(hours=1))
@@ -853,35 +856,47 @@ def test_round_trip_two_runs_no_second_publish_keeps_spell():
     # El estado leído de la Alert normalizada es el que escribió la primera pasada.
     info = existing[aid]
     assert info["ref_entity"] == PARCEL and info["status"] == "active"
-    state = fa._read_spell(info, aid)
-    assert state is not None and state.start == date(2026, 11, 8) and state.vibrated
-    assert state.last_night == date(2026, 11, 8) and state.stage == "near"
+    assert fa._spells_of(fa._frost_alerts_of(existing, PARCEL)) == [
+        fs.ExistingSpell(aid, "active", date(2026, 11, 8), date(2026, 11, 8), "near")]
     assert lc._parse(info["observed_at"]) == NOW
 
 
-def test_round_trip_two_active_alerts_latest_wins_and_decides():
+def test_round_trip_two_active_alerts_over_runs_without_a_second_write():
     broker = _NormalizedOrion()
-    # Racha antigua activa (se quedó sin cerrar), publicada antes: su estado no debe contar.
+    f = fetched({1: 1.0, 5: 1.0})  # dos cadenas separadas: dos Alert activas
+    out, _, _ = _roundtrip_run(broker, f, NOW)
+    first, second = dated(date(2026, 11, 6)), dated(date(2026, 11, 10))
+    assert out == "published"
+    assert {k: v["status"]["value"] for k, v in broker.entities.items()} == {
+        first: "active", second: "active"}
+
+    before = json.dumps(broker.entities, sort_keys=True)
+    out, existing, touched = _roundtrip_run(broker, fetched({1: 1.0, 5: 1.0}, hour=13),
+                                            NOW + timedelta(hours=1))
+    # Lead 1 vibrando reescribe cada hora (reintento); la lejana no.
+    assert out == "published" and {first, second} <= touched
+    assert broker.entities[second] == json.loads(before)[second]
+    spells = fa._spells_of(fa._frost_alerts_of(existing, PARCEL))
+    assert [(s.alert_id, s.start, s.last_night) for s in spells] == [
+        (first, date(2026, 11, 6), date(2026, 11, 6)),
+        (second, date(2026, 11, 10), date(2026, 11, 10))]
+
+
+def test_round_trip_failed_old_resolve_is_retried_next_run():
+    broker = _NormalizedOrion()
     old_start = date(2026, 10, 20)
     old_nights = sources.FrostNights(
         [Night(old_start + timedelta(days=i), 1.0 if i == 1 else 10.0, "forecast") for i in range(0, 8)],
         old_start, None, 12)
     _roundtrip_run(broker, old_nights, datetime(2026, 10, 20, 12, 0, tzinfo=timezone.utc))
     old_id = dated(old_start + timedelta(days=1))
-    assert broker.entities[old_id]["status"]["value"] == "active"
 
-    # Racha nueva activa: se publica y el cierre de la antigua falla, así que quedan dos.
     new_id = dated(date(2026, 11, 8))
     with patch.object(_NormalizedOrion, "append_entity_attrs", side_effect=RuntimeError("down")):
         out, _, _ = _roundtrip_run(broker, fetched({3: 1.0}), NOW)
     assert out == "published"
     assert broker.entities[old_id]["status"]["value"] == "active"
-    assert broker.entities[new_id]["status"]["value"] == "active"
 
-    existing = lc.load_existing(broker)
-    assert fa._latest(fa._frost_alerts_of(existing, PARCEL)) == new_id
-
-    # Siguiente pasada: decide con la racha nueva, no escribe y reintenta cerrar la antigua.
     out, _, _ = _roundtrip_run(broker, fetched({3: 1.0}), NOW + timedelta(hours=1))
     assert out == "unchanged"
     assert broker.entities[new_id]["observedAt"]["value"].startswith("2026-11-05T12:00")

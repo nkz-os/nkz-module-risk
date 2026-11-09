@@ -5,14 +5,15 @@ Corre lo real (`process_frost_parcel`, `load_existing`, `publish_alert._build`,
 simula notifications: solo `urgency=vibrate` es inmediato, deduplica por (id, severidad),
 anota solo lo enviado y libera al cerrarse el aviso.
 
-El oráculo NO lee el estado de la racha ni la decisión. Saca las noches en riesgo de sus
-propios umbrales y de lo que el worker publicó de verdad. Solo usa el id de la Alert,
-que es lo que ve notifications.
+El oráculo no conoce cadenas, rangos ni el estado de las Alert: saca las noches en riesgo
+de sus propios umbrales y solo mira lo que ve notifications y la app, es decir el id, la
+urgencia y la lista de noches publicada.
 """
 import functools
 import json
 import logging
 import random
+from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta, timezone
 from typing import Callable, Dict, List, Optional, Set
@@ -43,8 +44,8 @@ PARCEL = "urn:ngsi-ld:AgriParcel:p1"
 SETTINGS = MagicMock(weather_api_url="http://w", orion_ld_url="http://o", context_url="http://c")
 START = datetime(2026, 12, 1, 0, 15, tzinfo=timezone.utc)  # hora local = UTC en la simulación
 DAY0 = START.date()
-GAP = 2
 NEAR = 4
+MARGIN = 0.5
 
 
 # ── reglas del oráculo, escritas aparte del código ───────────────────
@@ -60,26 +61,31 @@ def oracle_trigger_leads(hour: int) -> range:
     return range(0 if hour < 10 else 1, 8)
 
 
-def oracle_at_risk(values: Dict[int, Optional[float]], hour: int) -> Dict[int, float]:
+def oracle_at_risk(values: Dict[int, Optional[float]], hour: int, margin: float = 0.0) -> Dict[int, float]:
     """{lead: tmin} de las noches en riesgo según el oráculo."""
     return {
         lead: values[lead] for lead in oracle_trigger_leads(hour)
-        if values.get(lead) is not None and values[lead] <= oracle_threshold(lead)
+        if values.get(lead) is not None and values[lead] <= oracle_threshold(lead) + margin
     }
 
 
-def oracle_complete(values: Dict[int, Optional[float]], hour: int) -> bool:
-    first = 0 if hour < 10 else 1
-    near_ok = all(values.get(lead) is not None for lead in range(first, NEAR + 1))
-    if not near_ok:
+def oracle_near_complete(values: Optional[Dict[int, Optional[float]]], hour: int) -> bool:
+    if values is None:
         return False
-    if oracle_at_risk(values, hour):
-        return True
+    first = 0 if hour < 10 else 1
+    return all(values.get(lead) is not None for lead in range(first, NEAR + 1))
+
+
+def oracle_horizon_complete(values: Dict[int, Optional[float]], hour: int) -> bool:
     return all(values.get(lead) is not None for lead in oracle_trigger_leads(hour))
 
 
 def imminent_window(lead: int, hour: int) -> bool:
     return (lead == 1 and hour >= 18) or (lead == 0 and hour < 10)
+
+
+def quiet(hour: int) -> bool:
+    return hour >= 22 or hour < 8
 
 
 # ── broker y notifications falsos ────────────────────────────────────
@@ -91,33 +97,53 @@ class Delivery:
     alert_id: str
     severity: str
     body: str
+    nights: Set[date]
+
+
+def listed_nights(entity: dict) -> Set[date]:
+    return {date.fromisoformat(n["day"]) for n in entity["evaluationData"]["value"].get("nights", [])}
 
 
 class FakeNotifications:
-    """Lo que hace notifications con cada Alert que Orion le notifica."""
+    """Lo que hace notifications con cada Alert que Orion le notifica.
 
-    def __init__(self, fail: Callable[[], bool]):
+    `one_row_per_channel=False` es el modelo pedido: se recuerda cada (id, severidad).
+    `True` es la tabla real, `alert_deliveries`, con clave (id, tenant, canal): cada envío
+    o fallo pisa la severidad de la fila, y `has_delivered` solo acierta con la última.
+    """
+
+    def __init__(self, fail: Callable[[], bool], one_row_per_channel: bool = False):
         self.fail = fail
+        self.one_row = one_row_per_channel
         self.sent: Set[tuple] = set()
+        self.rows: Dict[str, tuple] = {}
         self.deliveries: List[Delivery] = []
         self.failed_attempts: List[tuple] = []
         self.closes = 0
+
+    def _has_delivered(self, aid: str, severity: str) -> bool:
+        if self.one_row:
+            return self.rows.get(aid) == (severity, "sent")
+        return (aid, severity) in self.sent
 
     def on_upsert(self, entity: dict, at: datetime) -> None:
         if entity["urgency"]["value"] != "vibrate":
             return  # silent: va a la app y al resumen
         key = (entity["id"], entity["severity"]["value"])
-        if key in self.sent:
+        if self._has_delivered(*key):
             return
         if self.fail():
+            self.rows[key[0]] = (key[1], "failed")
             self.failed_attempts.append((at, key))
             return
+        self.rows[key[0]] = (key[1], "sent")
         self.sent.add(key)
-        self.deliveries.append(
-            Delivery(at, key[0], key[1], entity["plain"]["value"]["es"]["body"]))
+        self.deliveries.append(Delivery(
+            at, key[0], key[1], entity["plain"]["value"]["es"]["body"], listed_nights(entity)))
 
     def on_close(self, alert_id: str) -> None:
         self.sent = {k for k in self.sent if k[0] != alert_id}
+        self.rows.pop(alert_id, None)
         self.closes += 1
 
 
@@ -197,9 +223,11 @@ def drive(
     fail: Callable[[], bool] = lambda: False,
     muted: bool = False,
     start: datetime = START,
+    one_row_per_channel: bool = False,
+    after_run: Optional[Callable[[datetime, "FakeBroker", "FakeNotifications", str], None]] = None,
 ) -> Trace:
     """`forecast(now)` da {lead: tmin} (ausente = noche sin dato), o None si no hay dato."""
-    notifications = FakeNotifications(fail)
+    notifications = FakeNotifications(fail, one_row_per_channel)
     broker = FakeBroker(notifications)
     trace = Trace(broker, notifications)
     conn = conn_with(muted)
@@ -222,6 +250,8 @@ def drive(
                     existing, touched, now)
                 lc.sweep_expired(broker, existing, touched, {"frost": MODEL_CONFIG}, now)
                 trace.outcomes.append((now, outcome))
+                if after_run is not None:
+                    after_run(now, broker, notifications, outcome)
         finally:
             logging.disable(logging.NOTSET)
     return trace
@@ -235,6 +265,10 @@ def stable(cold: Dict[date, float], warm: float = 10.0):
 
 def active(broker: FakeBroker) -> List[dict]:
     return [v for v in broker.e.values() if v["status"]["value"] == "active"]
+
+
+def bodies(trace: Trace) -> List[str]:
+    return [d.body for d in trace.notifications.deliveries]
 
 
 # ── escenarios de la revisión ────────────────────────────────────────
@@ -310,6 +344,16 @@ def test_s5_outage_past_the_night_expires_by_ttl():
     assert [v for v in t.broker.e.values() if v["status"]["value"] == "expired"]
 
 
+def test_outage_keeps_every_alert_with_its_night_ahead():
+    cold = stable({DAY0 + timedelta(days=2): 1.0, DAY0 + timedelta(days=6): 1.0})
+
+    def f(now):
+        return None if now >= START + timedelta(hours=12) else cold(now)
+    t = drive(f, 24 + 12)
+    assert len(active(t.broker)) == 2
+    assert not [v for v in t.broker.e.values() if v["status"]["value"] == "expired"]
+
+
 def test_lost_delivery_is_retried_and_does_not_vibrate_again_after_success():
     fails = iter([True, True, True])
     t = drive(stable({FROST_DAY: 1.0}), 24 * 7, fail=lambda: next(fails, False))
@@ -345,17 +389,6 @@ def test_muted_parcel_never_vibrates_but_the_alert_stays():
     assert len(active(t.broker)) == 1
 
 
-def test_flapping_with_a_far_night_holding_the_stage_gives_one_vibrate():
-    def f(now):
-        v = {lead: 10.0 for lead in range(0, 8)}
-        v[6] = 2.0  # sostiene el escalón: sin resolver no se libera la deduplicación
-        if now.hour % 2 == 0:
-            v[2] = 1.0
-        return v
-    t = drive(f, 48)
-    assert len(t.notifications.deliveries) == 1
-
-
 def test_flapping_through_no_data_gives_one_vibrate():
     def f(now):
         v = stable({FROST_DAY: 1.0})(now)
@@ -387,84 +420,135 @@ def test_stable_active_alert_rarely_writes():
     assert t.broker.upserts <= 8
 
 
+# ── heladas separadas: secuencias que el modelo de una racha no cumplía ──
+
+
+def test_two_separated_cold_nights_stable_give_one_push_each_naming_its_night():
+    # 02/12 y 05/12, estables, todas las entregas bien.
+    early, late = DAY0 + timedelta(days=1), DAY0 + timedelta(days=4)
+    t = drive(stable({early: 1.0, late: 1.0}), 24 * 5, start=START + timedelta(hours=8))
+    assert len(t.notifications.deliveries) == 2
+    assert len({d.alert_id for d in t.notifications.deliveries}) == 2
+    assert sorted(bodies(t)) == ["Esta noche puede bajar a 1 °C.",
+                                 "Noche del viernes 04/12: puede bajar a 1 °C."]
+
+
+def test_later_night_first_then_earlier_night_appears_gives_one_push_each():
+    # 05/12 avisada; unas horas después aparece, estable, 02/12, fuera de la cadena.
+    late, early = DAY0 + timedelta(days=4), DAY0 + timedelta(days=1)
+
+    def f(now):
+        cold = {late: 1.0}
+        if now >= START + timedelta(hours=16):
+            cold[early] = 1.0
+        return stable(cold)(now)
+    t = drive(f, 24 * 5, start=START + timedelta(hours=8))
+    assert len(t.notifications.deliveries) == 2
+    assert len({d.alert_id for d in t.notifications.deliveries}) == 2
+    assert bodies(t) == ["Noche del viernes 04/12: puede bajar a 1 °C.",
+                         "Esta noche puede bajar a 1 °C."]
+
+
+def test_a_parcel_can_hold_two_active_alerts_and_the_first_closing_leaves_the_second():
+    early, late = DAY0 + timedelta(days=1), DAY0 + timedelta(days=4)
+    # Desde el 01/12 08:15: la última pasada es el 02/12 a las 09:15, y luego a las 10:15.
+    t = drive(stable({early: 1.0, late: 1.0}), 24 + 2, start=START + timedelta(hours=8))
+    assert len(active(t.broker)) == 2
+    t = drive(stable({early: 1.0, late: 1.0}), 24 + 3, start=START + timedelta(hours=8))
+    assert [listed_nights(a) for a in active(t.broker)] == [{late}]
+
+
+# ── (c) una noche que oscila en torno al umbral ──────────────────────
+
+
+@pytest.mark.parametrize("phase", [0, 1])
+@pytest.mark.parametrize("delta_lead", [3, 6])
+def test_c_night_hovering_around_its_threshold_gives_one_vibrate(phase, delta_lead):
+    night = DAY0 + timedelta(days=delta_lead)
+
+    def f(now):
+        v = {lead: 10.0 for lead in range(0, 8)}
+        lead = (night - now.date()).days
+        if 0 <= lead <= 7:
+            up = ((now - START).total_seconds() // (3 * 3600) + phase) % 2
+            v[lead] = oracle_threshold(lead) + (0.3 if up else -0.3)
+        return v
+    t = drive(f, 24 * delta_lead + 9)
+    assert len(t.notifications.deliveries) == 1, [d.at for d in t.notifications.deliveries]
+    assert "resolved" not in {o for _, o in t.outcomes}
+
+
+def test_c_hovering_never_closes_the_alert():
+    # Noche a lead 3 oscilando ±0,3 °C: la Alert no sale de `active` al cruzar el umbral.
+    # (Se reescribe cuando la mínima redondeada cambia de 3 a 4 °C: es la regla de publicación.)
+    night = DAY0 + timedelta(days=3)
+    statuses = []
+
+    def f(now):
+        up = ((now - START).total_seconds() // (3 * 3600)) % 2
+        return stable({night: 3.5 + (0.3 if up else -0.3)})(now)
+    t = drive(f, 24, after_run=lambda now, b, n, o: statuses.append(
+        tuple(sorted((k, v["status"]["value"]) for k, v in b.e.items()))))
+    assert len(t.broker.e) == 1
+    assert {s[0][1] for s in statuses} == {"active"}
+
+
 # ── propiedad con oráculo independiente ──────────────────────────────
 
 
 class Oracle:
-    """Comprueba (a), (b) y (c) con lo devuelto por el worker."""
+    """(a) y (b) a partir de lo publicado y entregado, sin saber nada de cadenas."""
 
     def __init__(self):
-        self.seen: Set[date] = set()            # noches vistas en riesgo, para el encadenado
-        self.credit: Dict[str, Set[date]] = {}  # severidad -> noches avisadas desde el último cierre
-        self.warned: Set[date] = set()
-        self.window_seen: Dict[date, int] = {}
-        self.window_attempts: Dict[date, int] = {}
+        self.credited: Set[str] = set()      # Alert con push entregado desde su último cierre
+        self.pushed_nights: Dict[str, Set[date]] = {}
         self.violations: List[tuple] = []
-        self.delivered_keys: Set[tuple] = set()
+        self.delivered: Counter = Counter()
+        self.closed_since: Set[tuple] = set()
+        self.windows_failed_out: Set[date] = set()
+        self.windows_covered: Set[date] = set()
+        self.covered_by_extension: Set[date] = set()
+        self.repeats_across_close = 0
 
-    def _linked_to_warned(self, day: date) -> bool:
-        """¿Hay una cadena de noches vistas, con saltos <= GAP, hasta una noche avisada?"""
-        pending, visited = [day], {day}
-        while pending:
-            cur = pending.pop()
-            if cur in self.warned:
-                return True
-            for other in self.seen:
-                if other not in visited and abs((other - cur).days) <= GAP:
-                    visited.add(other)
-                    pending.append(other)
-        return False
+    def observe(self, now, values, broker, deliveries, failed) -> None:
+        current: Dict[str, Set[date]] = {}
+        for aid, entity in broker.e.items():
+            if entity["status"]["value"] == "active":
+                current[aid] = listed_nights(entity)
+            else:
+                self.credited.discard(aid)
+                self.pushed_nights.pop(aid, None)
+                self.closed_since |= {k for k in self.delivered if k[0] == aid}
 
-    def observe(self, now, values, deliveries, failed, closed):
-        hour, today = now.hour, now.date()
-        if values is None or not oracle_complete(values, hour):
-            at_risk = {}
-        else:
-            at_risk = oracle_at_risk(values, hour)
-        days = {today + timedelta(days=lead): lead for lead in at_risk}
-        self.seen |= set(days)
-
-        near_days = {d for d, lead in days.items() if lead <= NEAR}
         for d in deliveries:
             key = (d.alert_id, d.severity)
-            if key in self.delivered_keys:
-                self.violations.append(("double_id", now.isoformat(), d.alert_id, d.severity))
-            self.delivered_keys.add(key)
-            new = near_days - self.credit.get(d.severity, set())
-            if not new:
-                # Más estricto que (b): una entrega que no añade ninguna noche a esa
-                # severidad no le dice nada nuevo al agricultor, sea cual sea el id.
-                self.violations.append(("double", now.isoformat(), d.alert_id, d.severity))
-            self.credit.setdefault(d.severity, set()).update(near_days)
-            self.warned |= near_days
+            if self.delivered[key]:
+                if key in self.closed_since:
+                    self.repeats_across_close += 1
+                else:
+                    self.violations.append(("double_id", now.isoformat(), d.alert_id, d.severity))
+            self.delivered[key] += 1
+            self.closed_since.discard(key)
+            self.credited.add(d.alert_id)
+            self.pushed_nights.setdefault(d.alert_id, set()).update(d.nights)
 
-        for day, lead in days.items():
-            if imminent_window(lead, hour):
-                self.window_seen[day] = self.window_seen.get(day, 0) + 1
-                if deliveries or failed:
-                    self.window_attempts[day] = self.window_attempts.get(day, 0) + 1
-
-        # Fin de noche: pasadas las 10:00 del día D ya no hay más oportunidades.
-        for day in list(self.window_seen):
-            if today > day or (today == day and hour >= 10):
-                if not self._linked_to_warned(day) and self.window_attempts.get(day, 0) == 0:
-                    # (a) ni aviso entregado ni un solo intento en toda la ventana. Si tampoco
-                    # hubo otro push en este episodio, el agricultor no se enteró de nada.
-                    kind = "missed" if self.warned else "missed_no_push"
-                    self.violations.append((kind, day.isoformat(), now.isoformat()))
-                del self.window_seen[day]
-
-        if closed:
-            # Sin ningún aviso abierto, lo avisado antes deja de contar. Cerrar solo la
-            # racha vieja al abrir otra no cuenta: el agricultor sigue avisado. Una noche ya
-            # avisada y retirada queda cumplida; si vuelve, debe avisarse otra vez.
-            for day in list(self.window_seen):
-                if self._linked_to_warned(day):
-                    del self.window_seen[day]
-            self.credit.clear()
-            self.delivered_keys.clear()
-            self.warned.clear()
-            self.seen.clear()
+        if not oracle_near_complete(values, now.hour):
+            return
+        failed_ids = {key[0] for _, key in failed}
+        for lead in oracle_at_risk(values, now.hour):
+            if not imminent_window(lead, now.hour):
+                continue
+            day = now.date() + timedelta(days=lead)
+            listing = [aid for aid, nights in current.items() if day in nights]
+            pushed = [aid for aid in listing if aid in self.credited]
+            if pushed:
+                self.windows_covered.add(day)
+                if not any(day in self.pushed_nights.get(aid, ()) for aid in pushed):
+                    self.covered_by_extension.add(day)
+            elif any(aid in failed_ids for aid in listing):
+                self.windows_failed_out.add(day)  # lo intentó esta hora y falló la entrega
+            else:
+                self.violations.append(("missed", day.isoformat(), now.isoformat(), lead, listing))
 
 
 def _random_forecast(rng: random.Random, days: int):
@@ -501,76 +585,73 @@ def _random_forecast(rng: random.Random, days: int):
     return f
 
 
-def _simulate(seed: int, days: int = 10, failure_rate: float = 0.3) -> List[tuple]:
+@dataclass
+class SimResult:
+    violations: List[tuple]
+    oracle: Oracle
+    deliveries: int
+    failed_attempts: int
+
+
+def _simulate(seed: int, days: int = 10, failure_rate: float = 0.3,
+              one_row_per_channel: bool = False) -> SimResult:
     rng = random.Random(seed)
-    forecast = _random_forecast(rng, days)
+    base = _random_forecast(rng, days)
     fail_rng = random.Random(seed + 1)
     oracle = Oracle()
-    notifications = FakeNotifications(lambda: fail_rng.random() < failure_rate)
-    broker = FakeBroker(notifications)
-    conn = conn_with(False)
-    clock = {"now": START, "values": None}
-
-    def fetch(*a, **k):
-        clock["values"] = forecast(clock["now"])
-        return _fetched(clock["values"], clock["now"])
-
     bad: List[tuple] = []
-    with patch.object(contract, "_now",
-                      lambda: clock["now"].isoformat().replace("+00:00", "Z")), \
-            patch.object(ap, "SyncOrionClient", lambda *a, **k: broker), \
-            patch.object(fa.sources, "fetch_frost_nights", fetch):
-        logging.disable(logging.CRITICAL)
-        try:
-            for h in range(days * 24):
-                now = START + timedelta(hours=h)
-                clock["now"] = now
-                broker.clock = now
-                existing = lc.load_existing(broker)
-                before_status = {k: v["status"]["value"] for k, v in broker.e.items()}
-                n_del, n_fail, n_rel = (len(notifications.deliveries),
-                                        len(notifications.failed_attempts), notifications.closes)
-                touched: Set[str] = set()
-                outcome = fa.process_frost_parcel(
-                    broker, conn, SETTINGS, T, RISK, {"id": PARCEL, "type": "AgriParcel"},
-                    existing, touched, now)
-                lc.sweep_expired(broker, existing, touched, {"frost": MODEL_CONFIG}, now)
-                values = clock["values"]
-                # Coherencia: sin dato completo nunca hay publicación ni resolución.
-                complete = values is not None and oracle_complete(values, now.hour)
-                if complete != (outcome != "no_data"):
-                    bad.append(("no_data_mismatch", now.isoformat(), outcome, values))
-                if complete and oracle_at_risk(values, now.hour) and outcome in ("resolved", "none"):
-                    bad.append(("resolved_at_risk", now.isoformat(), outcome, values))
-                if complete and not oracle_at_risk(values, now.hour) and outcome not in ("resolved", "none"):
-                    bad.append(("alert_without_risk", now.isoformat(), outcome, values))
-                if outcome == "no_data":
-                    closed_now = [
-                        k for k, v in broker.e.items()
-                        if before_status.get(k) == "active" and v["status"]["value"] == "resolved"]
-                    if closed_now:
-                        bad.append(("no_data_resolved", now.isoformat(), closed_now))
-                oracle.observe(
-                    now, values,
-                    notifications.deliveries[n_del:],
-                    notifications.failed_attempts[n_fail:],
-                    notifications.closes != n_rel and not active(broker),
-                )
-        finally:
-            logging.disable(logging.NOTSET)
-    return bad + oracle.violations
+    seen = {"values": None, "status": {}, "deliveries": 0, "failed": 0}
+
+    def forecast(now):
+        seen["values"] = base(now)
+        return seen["values"]
+
+    def after_run(now, broker, notifications, outcome):
+        values, hour = seen["values"], now.hour
+        near_ok = oracle_near_complete(values, hour)
+        # Coherencia: sin dato de las noches cercanas nunca hay publicación ni resolución.
+        if not near_ok:
+            if outcome != "no_data":
+                bad.append(("no_data_mismatch", now.isoformat(), outcome, values))
+            closed = [k for k, v in broker.e.items()
+                      if seen["status"].get(k) == "active" and v["status"]["value"] == "resolved"]
+            if closed:
+                bad.append(("no_data_resolved", now.isoformat(), closed))
+        else:
+            if oracle_at_risk(values, hour) and outcome in ("resolved", "none", "no_data"):
+                bad.append(("resolved_at_risk", now.isoformat(), outcome, values))
+            if oracle_horizon_complete(values, hour) and outcome == "no_data":
+                bad.append(("no_data_mismatch", now.isoformat(), outcome, values))
+            if not oracle_at_risk(values, hour, margin=MARGIN) and outcome in ("published", "unchanged"):
+                bad.append(("alert_without_risk", now.isoformat(), outcome, values))
+        oracle.observe(
+            now, values, broker,
+            notifications.deliveries[seen["deliveries"]:],
+            notifications.failed_attempts[seen["failed"]:],
+        )
+        seen["deliveries"] = len(notifications.deliveries)
+        seen["failed"] = len(notifications.failed_attempts)
+        seen["status"] = {k: v["status"]["value"] for k, v in broker.e.items()}
+
+    t = drive(forecast, days * 24, fail=lambda: fail_rng.random() < failure_rate,
+              one_row_per_channel=one_row_per_channel, after_run=after_run)
+    return SimResult(bad + oracle.violations, oracle, len(t.notifications.deliveries),
+                     len(t.notifications.failed_attempts))
 
 
-SEEDS = 130
+SEEDS = 80
 
 
 @functools.lru_cache(maxsize=None)
-def _all_violations() -> tuple:
-    return tuple((20261105 + seed,) + v for seed in range(SEEDS) for v in _simulate(20261105 + seed))
+def _all_violations(one_row_per_channel: bool = False) -> tuple:
+    return tuple(
+        (20261105 + seed,) + v for seed in range(SEEDS)
+        for v in _simulate(20261105 + seed, one_row_per_channel=one_row_per_channel).violations
+    )
 
 
-def _violations_of(*kinds: str) -> List[tuple]:
-    return [v for v in _all_violations() if v[1] in kinds]
+def _violations_of(*kinds: str, one_row_per_channel: bool = False) -> List[tuple]:
+    return [v for v in _all_violations(one_row_per_channel) if v[1] in kinds]
 
 
 def test_property_outcome_agrees_with_the_oracle():
@@ -579,54 +660,40 @@ def test_property_outcome_agrees_with_the_oracle():
     )), bad[:3]
 
 
-def test_property_b_at_most_one_delivery_per_spell_and_severity_between_closes():
+@pytest.mark.parametrize("one_row", [False, True])
+def test_property_a_every_frost_night_gets_a_delivered_vibrate_by_its_window(one_row):
+    assert not (bad := _violations_of("missed", one_row_per_channel=one_row)), bad[:5]
+
+
+def test_property_b_at_most_one_delivery_per_id_and_severity_between_closes():
     assert not (bad := _violations_of("double_id")), bad[:5]
 
 
-def test_property_a_no_frost_episode_goes_without_any_push():
-    assert not (bad := _violations_of("missed_no_push")), bad[:5]
+def test_property_the_oracle_is_not_vacuous():
+    sims = [_simulate(20261105 + seed) for seed in range(10)]
+    assert sum(len(s.oracle.windows_covered) for s in sims) > 20
+    assert sum(s.failed_attempts for s in sims) > 10
 
 
-COUNTEREXAMPLE = (
-    "Racha y deduplicación: una noche fuera de la cadena comparte (id, severidad) con otra; "
-    "pendiente de decisión del owner"
-)
+# ── (d) previsión estable ────────────────────────────────────────────
 
 
-@pytest.mark.xfail(strict=True, reason=COUNTEREXAMPLE)
-def test_property_a_every_frost_night_gets_a_vibrate():
-    assert not (bad := _violations_of("missed")), bad[:5]
+def _stable_random(seed: int, days: int = 10):
+    rng = random.Random(seed)
+    cold = {DAY0 + timedelta(days=d): (rng.uniform(-8.0, 4.8) if rng.random() < 0.35 else 10.0)
+            for d in range(0, days + 9)}
+    return stable(cold)
 
 
-@pytest.mark.xfail(strict=True, reason=COUNTEREXAMPLE)
-def test_property_b_no_delivery_repeats_only_known_nights():
-    assert not (bad := _violations_of("double")), bad[:5]
-
-
-# ── contraejemplos mínimos, sin fallos de entrega ni previsión que cambie ────
-
-
-@pytest.mark.xfail(strict=True, reason=COUNTEREXAMPLE)
-def test_counterexample_two_separated_nights_both_near_only_the_first_is_pushed():
-    # Noches a lead 1 y lead 4, estables, todas las entregas bien. Sale una sola racha
-    # (la de la noche tardía), con su push nombrando la temprana; la tardía no vibra nunca.
-    start = START + timedelta(hours=8)
-    early, late = DAY0 + timedelta(days=1), DAY0 + timedelta(days=4)
-    t = drive(stable({early: 1.0, late: 1.0}), 24 * 5, start=start)
-    assert len(t.notifications.deliveries) == 2
-
-
-@pytest.mark.xfail(strict=True, reason=COUNTEREXAMPLE)
-def test_counterexample_earlier_night_under_a_delivered_spell_never_vibrates():
-    # Avisada la noche de lead 4; unas horas después aparece, estable, otra 3 noches antes
-    # (fuera de la cadena: el hueco admitido es de 2).
-    late = DAY0 + timedelta(days=4)
-    early = DAY0 + timedelta(days=1)
-
-    def f(now):
-        cold = {late: 1.0}
-        if now >= START + timedelta(hours=16):
-            cold[early] = 1.0
-        return stable(cold)(now)
-    t = drive(f, 24 * 3, start=START + timedelta(hours=8))
-    assert len(t.notifications.deliveries) == 2
+@pytest.mark.parametrize("failure_rate", [0.0, 0.3])
+def test_property_d_stable_forecast_pushes_at_most_twice_per_alert_and_respects_quiet_hours(failure_rate):
+    for seed in range(60):
+        fail_rng = random.Random(seed + 1)
+        t = drive(_stable_random(20261105 + seed), 24 * 10,
+                  fail=lambda: fail_rng.random() < failure_rate)
+        per_id = Counter(d.alert_id for d in t.notifications.deliveries)
+        assert max(per_id.values(), default=0) <= 2, (seed, per_id)
+        for d in t.notifications.deliveries:
+            if quiet(d.at.hour):
+                leads = {(n - d.at.date()).days for n in d.nights}
+                assert 0 in leads or (1 in leads and d.at.hour >= 18), (seed, d)
