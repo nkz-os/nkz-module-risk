@@ -82,6 +82,10 @@ class ExistingSpell:
     last_night: Optional[date]
     stage: str  # último escalón publicado
     peak_severity: Optional[str] = None  # severidad más alta publicada con este id
+    announced: tuple[date, ...] = ()  # noches de las publicaciones que notifications empuja
+    announced_severity: Optional[str] = None  # severidad del último anuncio
+    # Rango que el usuario descartó, si la Alert se reabrió por noches fuera de él.
+    dismissed_range: Optional[tuple[date, date]] = None
 
 
 @dataclass(frozen=True)
@@ -98,7 +102,10 @@ class ChainDecision:
     coldest: Night
     text_night: Night
     text_lead: int
-    close: bool              # alguna noche a lead <= 1
+    imminent: bool           # alguna noche inminente: lead 0, o lead 1 desde las 18:00
+    announced: tuple[date, ...]  # noches anunciadas tras esta publicación
+    announced_severity: Optional[str]
+    dismissed_range: Optional[tuple[date, date]]
     skip: bool               # descartada y el escalón no ha subido
 
 
@@ -247,22 +254,52 @@ def _matches(s: ExistingSpell, chain: tuple[Night, ...], gap: int, today: date) 
     return (chain[0].day - b).days <= gap and (a - chain[-1].day).days <= gap
 
 
+def _may_keep(s: ExistingSpell, chain: tuple[Night, ...], cfg: FrostConfig, today: date,
+              first: int) -> bool:
+    """Una Alert ya anunciada solo se queda con la cadena si esta aún contiene una noche
+    anunciada y ninguna de sus noches cercanas es anterior a la primera anunciada que
+    queda por delante.
+
+    Si no, el push ya enviado nombra otra noche: la cadena abre Alert nueva (id nuevo,
+    push nuevo) y la vieja se resuelve. Una Alert nunca anunciada casa como siempre.
+    ASSUMPTION: la regla del brief decía «contiene una noche anunciada, o ninguna noche
+    cercana es anterior»; con «o», el oráculo por noche encuentra heladas sin push (una
+    noche anterior que se suma a la cadena, o el frío que se va a una noche posterior).
+    """
+    if not s.announced:
+        return True
+    if not any(n.day in s.announced for n in chain):
+        return False
+    ahead = [d for d in s.announced if d > today or (d == today and first == 0)]
+    if not ahead:
+        return True
+    earliest = min(ahead)
+    return all(
+        n.day >= earliest for n in chain
+        if first <= (n.day - today).days <= cfg.near_nights
+    )
+
+
 def match_chains(
-    chains: Sequence[tuple[Night, ...]], existing: Sequence[ExistingSpell], gap_nights: int,
-    today: date,
+    chains: Sequence[tuple[Night, ...]], existing: Sequence[ExistingSpell], cfg: FrostConfig,
+    today: date, local_hour: int,
 ) -> tuple[list[Optional[ExistingSpell]], list[ExistingSpell]]:
     """Empareja cada cadena con una Alert existente, o con ninguna (Alert nueva).
 
-    Por orden de cadena: de las Alert que casan y nadie ha tomado, la de `start` más
-    temprano la toma; las demás que casan con esa cadena quedan fundidas (se resuelven,
-    sin push). Devuelve la Alert de cada cadena y las fundidas.
+    Por orden de cadena: de las Alert que casan, nadie ha tomado y pueden quedarse con la
+    cadena (`_may_keep`), la de `start` más temprano la toma; las demás que casan con esa
+    cadena quedan fundidas (se resuelven, sin push). Devuelve la Alert de cada cadena y
+    las fundidas.
     """
+    first = first_trigger_lead(local_hour)
     taken: set[str] = set()
     merged: list[ExistingSpell] = []
     out: list[Optional[ExistingSpell]] = []
     for chain in chains:
         cands = sorted(
-            (s for s in existing if s.alert_id not in taken and _matches(s, chain, gap_nights, today)),
+            (s for s in existing
+             if s.alert_id not in taken and _matches(s, chain, cfg.gap_nights, today)
+             and _may_keep(s, chain, cfg, today, first)),
             key=lambda s: (s.start, s.alert_id),
         )
         out.append(cands[0] if cands else None)
@@ -286,10 +323,9 @@ def chain_urgency(stage: str, muted: bool, local_hour: int, imminent: bool) -> s
     return URGENCY_SILENT
 
 
-
 def _decide_chain(
     chain: tuple[Night, ...], spell: Optional[ExistingSpell], cfg: FrostConfig, today: date,
-    muted: bool, local_hour: int,
+    muted: bool, local_hour: int, used_starts: frozenset = frozenset(),
 ) -> ChainDecision:
     first = first_trigger_lead(local_hour)
 
@@ -319,14 +355,24 @@ def _decide_chain(
     # Descartada: se salta mientras todas las noches de la cadena caigan en su rango y el
     # escalón no suba. Si hay noches fuera, se trata como no descartada, y el texto y la
     # inminencia salen de esas noches, como para una cadena nueva.
+    # Reabierta por esas noches, la Alert recuerda el rango descartado y el texto sigue
+    # nombrando solo noches fuera de él mientras las haya.
     pool = triggers
     skip = False
+    dismissed_range = (
+        spell.dismissed_range if spell is not None and spell.status == STATUS_ACTIVE else None
+    )
     if spell is not None and spell.status == STATUS_DISMISSED and _dated(spell) \
             and not should_reopen_dismissed(spell.stage, stage):
         a, b = _span(spell)
         outside = tuple(n for n in triggers if not a <= n.day <= b)
         skip = not outside
         pool = outside or triggers
+        if outside:
+            dismissed_range = (a, b)
+    elif dismissed_range is not None:
+        a, b = dismissed_range
+        pool = tuple(n for n in triggers if not a <= n.day <= b) or triggers
 
     imminent = [n for n in pool if is_imminent(lead(n), local_hour)]
     severe = [n for n in pool if lead(n) <= cfg.near_nights and n.tmin_c <= cfg.severe_c]
@@ -337,7 +383,42 @@ def _decide_chain(
     else:
         text = pool[0]
 
-    start = spell.start if spell is not None else chain[0].day
+    urgency = chain_urgency(stage, muted, local_hour, bool(imminent))
+    # ASSUMPTION: anuncio = una publicación que notifications empuja: vibrate con id nuevo,
+    # con la Alert no activa (su deduplicación se liberó) o con una severidad por encima de
+    # la del último anuncio. El brief decía «cada publicación con vibrate», pero las
+    # republicaciones deduplicadas no llegan al teléfono: una noche que se suma después
+    # quedaba «anunciada» sin que ningún push la nombrara.
+    announced = spell.announced if spell is not None else ()
+    announced_severity = spell.announced_severity if spell is not None else None
+    if spell is not None and spell.status != STATUS_ACTIVE:
+        # Cerrada o descartada: notifications liberó su deduplicación; la próxima
+        # publicación con vibrate empuja aunque esta salga en silencio.
+        announced_severity = None
+    pushes = urgency == URGENCY_VIBRATE and (
+        spell is None or spell.status != STATUS_ACTIVE or not announced
+        or announced_severity not in _SEVERITY_RANK
+        or _SEVERITY_RANK[severity] > _SEVERITY_RANK[announced_severity]
+    )
+    trigger_days = {n.day for n in triggers}
+    if urgency == URGENCY_VIBRATE and not pushes:
+        # Reintento deduplicado: el push entregado puede ser este, así que una noche
+        # anunciada que ya no está en la cadena (y no ha pasado) deja de contar.
+        announced = tuple(d for d in announced
+                          if d in trigger_days or d < today or (d == today and first == 1))
+    if pushes:
+        announced = tuple(sorted(set(announced) | trigger_days))
+        announced_severity = severity
+    if spell is not None:
+        start = spell.start
+    else:
+        # ASSUMPTION: una Alert nueva nunca nace con el inicio (y por tanto el id) de una
+        # Alert viva de la parcela: se tomaría la fila de deduplicación de esa y la misma
+        # pasada publicaría y resolvería un id. Solo pasa si una Alert anunciada se queda
+        # sin su cadena y el frío vuelve a su primera noche; se usa el día libre siguiente.
+        start = chain[0].day
+        while start in used_starts:
+            start += timedelta(days=1)
     # ASSUMPTION: last_night nunca queda antes de start. Una cadena que solo tiene noches
     # anteriores al inicio deja el rango en [start, start]: el id sigue siendo el de la
     # primera noche y ninguna cadena nueva puede nacer con ese mismo id.
@@ -349,13 +430,16 @@ def _decide_chain(
         last_night=last,
         stage=stage,
         severity=severity,
-        urgency=chain_urgency(stage, muted, local_hour, bool(imminent)),
+        urgency=urgency,
         nights=triggers,
         next_night=triggers[0],
         coldest=coldest,
         text_night=text,
         text_lead=lead(text),
-        close=any(lead(n) <= 1 for n in triggers),
+        imminent=bool(imminent),
+        announced=announced,
+        announced_severity=announced_severity,
+        dismissed_range=dismissed_range,
         skip=skip,
     )
 
@@ -396,9 +480,14 @@ def decide_chains(
         c for c in build_chains(at_risk_nights(by_lead, existing_spells, cfg), cfg.gap_nights)
         if any((n.day - today).days >= first for n in c)
     ]
-    matched, merged = match_chains(chains, existing_spells, cfg.gap_nights, today)
+    matched, merged = match_chains(chains, existing_spells, cfg, today, local_hour)
+    used_starts = frozenset(
+        s.start for s in existing_spells
+        if s.start is not None and s.status in (STATUS_ACTIVE, STATUS_DISMISSED)
+    )
     decisions = tuple(
-        _decide_chain(c, s, cfg, today, muted, local_hour) for c, s in zip(chains, matched)
+        _decide_chain(c, s, cfg, today, muted, local_hour, used_starts)
+        for c, s in zip(chains, matched)
     )
 
     taken = {s.alert_id for s in matched if s is not None}

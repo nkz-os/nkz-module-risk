@@ -29,6 +29,9 @@ _PAGE = 500
 
 # Historial de Alert cerradas que se conserva en Orion (evita inflarlo).
 PURGE_AFTER_DAYS = 90
+# Por tipo: helada abre una Alert por cadena de noches, así que acumula muchas; 14 días
+# cubren de sobra el emparejado con una Alert resuelta (última noche + hueco).
+PURGE_AFTER_DAYS_BY_TYPE = {"frost": 14}
 
 
 def decide(prev_status: Optional[str], score: float, threshold: float) -> str:
@@ -143,7 +146,8 @@ def purge_closed(
     now: datetime,
     max_age_days: int = PURGE_AFTER_DAYS,
 ) -> int:
-    """Borra las Alert cerradas hace más de `max_age_days`.
+    """Borra las Alert cerradas hace más de `max_age_days` (o lo que fije su tipo en
+    `PURGE_AFTER_DAYS_BY_TYPE`).
 
     No toca las `active` ni las `dismissed` que esta ejecución ha visto aún en
     condición: borrarlas haría que el worker las volviera a publicar.
@@ -154,7 +158,8 @@ def purge_closed(
             continue
         if is_foreign(alert_id, info.get("alert_type")):
             continue
-        if is_expired(info.get("state_at"), max_age_days * 24, now):
+        days = PURGE_AFTER_DAYS_BY_TYPE.get(info.get("alert_type") or "", max_age_days)
+        if is_expired(info.get("state_at"), days * 24, now):
             orion.delete_entity(alert_id)
             purged += 1
     return purged

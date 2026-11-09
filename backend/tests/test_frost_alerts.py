@@ -373,7 +373,7 @@ def test_one_failing_parcel_does_not_stop_the_others():
     outcomes = [RuntimeError("boom"), "published"]
     with patch.object(fa, "process_frost_parcel", side_effect=outcomes):
         c = _evaluate_frost_risk(orion, MagicMock(), SETTINGS, T, RISK, {}, set(), NOW, None)
-    assert c == {"evaluated": 1, "errors": 1, "frost_no_data": 0}
+    assert c == {"evaluated": 1, "errors": 1, "frost_no_data": 0, "frost_parcels": 2}
 
 
 # ── freno por tenant (I1) ─────────────────────────────────────────────
@@ -533,22 +533,33 @@ def test_publish_rule_urgency_change_writes():
     assert out == "published" and pub.call_args[1]["urgency"] == "silent"
 
 
-def test_publish_rule_six_hours_refreshes():
-    aid, info = _published_state(fetched({3: 1.0}), observed="2026-11-05T06:00:00Z")
-    out, _, pub, _ = run(fetched({3: 1.0}), {aid: info})
-    assert out == "published" and pub.called
-    aid, info = _published_state(fetched({3: 1.0}), observed="2026-11-05T06:00:01Z")
-    assert run(fetched({3: 1.0}), {aid: info})[0] == "unchanged"
+def test_publish_rule_six_hours_refreshes_a_silent_alert():
+    aid, info = _published_state(fetched({6: 1.0}), observed="2026-11-05T06:00:00Z")
+    out, _, pub, _ = run(fetched({6: 1.0}), {aid: info})
+    assert out == "published" and pub.call_args[1]["urgency"] == "silent"
+    aid, info = _published_state(fetched({6: 1.0}), observed="2026-11-05T06:00:01Z")
+    assert run(fetched({6: 1.0}), {aid: info})[0] == "unchanged"
 
 
-def test_publish_rule_vibrate_retries_hourly_when_close():
-    for lead in (1,):
-        aid, info = _published_state(fetched({lead: 1.0}), observed="2026-11-05T11:59:00Z")
+def test_publish_rule_vibrate_retries_every_three_hours_when_not_imminent():
+    for lead in (1, 2, 4):  # lead 1 a mediodía no es inminente
+        aid, info = _published_state(fetched({lead: 1.0}), observed="2026-11-05T09:00:01Z")
+        assert run(fetched({lead: 1.0}), {aid: info})[0] == "unchanged", lead
+        aid, info = _published_state(fetched({lead: 1.0}), observed="2026-11-05T09:00:00Z")
         out, _, pub, _ = run(fetched({lead: 1.0}), {aid: info})
-        assert out == "published" and pub.call_args[1]["urgency"] == "vibrate"
-    # Lead 2: no hay reintento horario.
-    aid, info = _published_state(fetched({2: 1.0}), observed="2026-11-05T11:59:00Z")
-    assert run(fetched({2: 1.0}), {aid: info})[0] == "unchanged"
+        assert out == "published" and pub.call_args[1]["urgency"] == "vibrate", lead
+
+
+def test_publish_rule_vibrate_retries_hourly_while_imminent():
+    at_19 = datetime(2026, 11, 5, 19, 0, tzinfo=timezone.utc)
+    _, _, pub, _ = run(fetched({1: 1.0}, hour=19), {})
+    aid = pub.call_args[1]["alert_id"]
+    info = {**alert(observed="2026-11-05T18:59:00Z"), "evaluation_data": pub.call_args[1]["evaluation_data"]}
+    with patch.object(fa.sources, "fetch_frost_nights", return_value=fetched({1: 1.0}, hour=19)), \
+            patch.object(fa, "publish_alert", return_value=True) as pub2:
+        out = fa.process_frost_parcel(MagicMock(), conn_with(), SETTINGS, T, RISK, {"id": PARCEL},
+                                      {aid: info}, set(), at_19)
+    assert out == "published" and pub2.call_args[1]["urgency"] == "vibrate"
 
 
 def test_publish_rule_silent_close_does_not_retry():
@@ -607,6 +618,92 @@ def test_unmuting_mid_spell_vibrates_on_the_next_run():
     info = {**alert(observed="2026-11-05T11:59:00Z"), "evaluation_data": pub.call_args[1]["evaluation_data"]}
     out, _, pub2, _ = run(fetched({3: 1.0}), {aid: info})
     assert out == "published" and pub2.call_args[1]["urgency"] == "vibrate"
+
+
+# ── noches anunciadas (C1 de la revisión 2) ───────────────────────────
+
+
+def test_announced_nights_are_stored_only_by_vibrate_publishes():
+    _, _, pub, _ = run(fetched({2: 1.0, 6: 1.0}), {})  # dos cadenas: cercana y lejana
+    assert [c[1]["evaluation_data"]["announced"] for c in pub.call_args_list] == [["2026-11-07"], []]
+    _, _, pub, _ = run(fetched({2: 1.0}, hour=23), {})  # horas de silencio: silent
+    assert pub.call_args[1]["evaluation_data"]["announced"] == []
+
+
+def test_announced_nights_round_trip_and_grow_only_on_a_publish_that_pushes():
+    aid, info = _published_state(fetched({2: 1.0}), observed="2026-11-05T09:00:00Z")
+    spells = fa._spells_of({aid: info})
+    assert spells[0].announced == (date(2026, 11, 7),) and spells[0].announced_severity == "high"
+    out, _, pub, _ = run(fetched({2: 1.0, 3: 1.0}), {aid: info})  # misma severidad: deduplicado
+    assert out == "published"
+    assert pub.call_args[1]["evaluation_data"]["announced"] == ["2026-11-07"]
+    out, _, pub, _ = run(fetched({2: -6.0, 3: 1.0}), {aid: info})  # sube a critical: empuja
+    data = pub.call_args[1]["evaluation_data"]
+    assert data["announced"] == ["2026-11-07", "2026-11-08"] and data["announced_severity"] == "critical"
+
+
+def test_unreadable_announced_reads_as_never_announced(caplog):
+    aid, info = _published_state(fetched({2: 1.0}), observed="2026-11-05T09:00:00Z")
+    info["evaluation_data"]["announced"] = ["garbage"]
+    assert fa._spells_of({aid: info})[0].announced == ()
+
+
+# ── historial y salida del worker ─────────────────────────────────────
+
+
+def test_closed_frost_alerts_are_purged_after_fourteen_days_others_after_ninety():
+    def at(days):
+        return (NOW - timedelta(days=days)).isoformat().replace("+00:00", "Z")
+    existing = {
+        "frost_15": {"status": "resolved", "alert_type": "frost", "state_at": at(15)},
+        "frost_13": {"status": "expired", "alert_type": "frost", "state_at": at(13)},
+        "pest_15": {"status": "resolved", "alert_type": "gdd_pest", "state_at": at(15)},
+        "pest_91": {"status": "resolved", "alert_type": "gdd_pest", "state_at": at(91)},
+    }
+    orion = MagicMock()
+    assert lc.purge_closed(orion, existing, touched=set(), now=NOW) == 2
+    assert {c[0][0] for c in orion.delete_entity.call_args_list} == {"frost_15", "pest_91"}
+
+
+def test_frost_pass_counts_parcels():
+    from app.worker.processor import _evaluate_frost_risk
+
+    orion = MagicMock()
+    orion.query_entities.return_value = _parcels(3)
+    with patch.object(fa, "process_frost_parcel", side_effect=["no_data", "published", "no_data"]):
+        c = _evaluate_frost_risk(orion, MagicMock(), SETTINGS, T, RISK, {}, set(), NOW, None)
+    assert c == {"evaluated": 1, "errors": 0, "frost_no_data": 2, "frost_parcels": 3}
+
+
+def _main_with(results):
+    from app.worker import processor
+
+    conn = MagicMock()
+    conn.cursor.return_value.__enter__.return_value.fetchall.return_value = [
+        {"tenant_id": t} for t in results]
+    with patch("app.db.get_conn", return_value=conn), \
+            patch.object(processor, "evaluate_risks_for_tenant",
+                         side_effect=lambda c, t: results[t]):
+        return processor.main()
+
+
+def test_worker_exits_non_zero_when_a_tenant_had_no_frost_data_at_all(caplog):
+    ok = {"evaluated": 1, "errors": 0, "frost_no_data": 1, "frost_parcels": 3}
+    dark = {"evaluated": 0, "errors": 0, "frost_no_data": 4, "frost_parcels": 4}
+    with caplog.at_level(logging.ERROR):
+        assert _main_with({"tenant-a": ok, "tenant-b": dark}) == 1
+    lines = [r.getMessage() for r in caplog.records if "frost_all_no_data" in r.getMessage()]
+    assert len(lines) == 1 and "tenant=tenant-b" in lines[0]
+    assert "parcels=4" in lines[0] and "no_data=4" in lines[0]
+
+
+def test_worker_exits_zero_otherwise():
+    assert _main_with({}) == 0
+    assert _main_with({"tenant-a": {"evaluated": 0, "errors": 2, "frost_no_data": 0,
+                                    "frost_parcels": 0}}) == 0
+    assert _main_with({"tenant-a": {"evaluated": 0, "errors": 0, "frost_no_data": 0}}) == 0
+    assert _main_with({"tenant-a": {"evaluated": 2, "errors": 0, "frost_no_data": 1,
+                                    "frost_parcels": 3}}) == 0
 
 
 # ── contrato y modelos ────────────────────────────────────────────────
@@ -789,7 +886,7 @@ def test_empty_catalog_reports_frost_no_data_key():
     with patch.object(processor, "_get_catalog", return_value=[]), \
             patch.object(processor, "get_settings", return_value=SETTINGS):
         assert processor._evaluate_risks(MagicMock(), T) == {
-            "evaluated": 0, "errors": 0, "frost_no_data": 0}
+            "evaluated": 0, "errors": 0, "frost_no_data": 0, "frost_parcels": 0}
 
 
 # ── ida y vuelta del estado de la racha por Orion (forma normalizada) ─
@@ -857,7 +954,8 @@ def test_round_trip_two_runs_no_second_publish_keeps_spell():
     info = existing[aid]
     assert info["ref_entity"] == PARCEL and info["status"] == "active"
     assert fa._spells_of(fa._frost_alerts_of(existing, PARCEL)) == [
-        fs.ExistingSpell(aid, "active", date(2026, 11, 8), date(2026, 11, 8), "near", "high")]
+        fs.ExistingSpell(aid, "active", date(2026, 11, 8), date(2026, 11, 8), "near", "high",
+                         (date(2026, 11, 8),), "high")]
     assert lc._parse(info["observed_at"]) == NOW
 
 
@@ -886,9 +984,9 @@ def test_round_trip_two_active_alerts_over_runs_without_a_second_write():
     before = json.dumps(broker.entities, sort_keys=True)
     out, existing, touched = _roundtrip_run(broker, fetched({1: 1.0, 5: 1.0}, hour=13),
                                             NOW + timedelta(hours=1))
-    # Lead 1 vibrando reescribe cada hora (reintento); la lejana no.
-    assert out == "published" and {first, second} <= touched
-    assert broker.entities[second] == json.loads(before)[second]
+    # Ninguna es inminente (lead 1 antes de las 18:00): ninguna se reescribe.
+    assert out == "unchanged" and {first, second} <= touched
+    assert json.loads(json.dumps(broker.entities)) == json.loads(before)
     spells = fa._spells_of(fa._frost_alerts_of(existing, PARCEL))
     assert [(s.alert_id, s.start, s.last_night) for s in spells] == [
         (first, date(2026, 11, 6), date(2026, 11, 6)),

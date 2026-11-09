@@ -33,9 +33,13 @@ def _nights(overrides=None, upto=7, running=WARM):
     return out
 
 
-def _spell(start, last=None, status="active", stage="near", aid=None, peak=None):
+def _spell(start, last=None, status="active", stage="near", aid=None, peak=None, announced=(),
+           announced_severity=None, dismissed_range=None):
     last = start if last is None else last
-    return ExistingSpell(aid or f"a{start:%m%d}", status, start, last, stage, peak)
+    if announced and announced_severity is None:
+        announced_severity = "high"
+    return ExistingSpell(aid or f"a{start:%m%d}", status, start, last, stage, peak, tuple(announced),
+                         announced_severity, dismissed_range)
 
 
 def _decide(overrides=None, existing=(), muted=False, hour=NOON, running=WARM, upto=7):
@@ -297,6 +301,20 @@ def test_dismissed_reopened_by_outside_nights_waits_for_them_in_quiet_hours():
     assert _one(_decide({1: 1.0, 3: 1.0}, existing=[d], hour=9)).urgency == "vibrate"
 
 
+def test_dismissed_reopened_by_outside_nights_remembers_the_dismissed_range():
+    d = _spell(D(1), status="dismissed", announced=[D(1)])
+    c = _one(_decide({1: 1.0, 3: 1.0}, existing=[d], hour=23))
+    assert c.dismissed_range == (D(1), D(1)) and c.announced_severity is None
+    # Siguiente pasada: ya activa; el texto sigue sin nombrar la noche descartada.
+    a = _spell(D(1), last=D(3), status="active", announced=[D(1)], dismissed_range=(D(1), D(1)))
+    a = ExistingSpell(a.alert_id, "active", D(1), D(3), "near", "high", (D(1),), None, (D(1), D(1)))
+    c = _one(_decide({1: 1.0, 3: 1.0}, existing=[a], hour=9))
+    assert c.text_night.day == D(3) and c.urgency == "vibrate" and c.dismissed_range == (D(1), D(1))
+    assert c.announced == (D(1), D(3))  # la deduplicación se liberó al descartar: esto empuja
+    # Sin noches fuera del rango descartado, el texto vuelve a la regla normal.
+    assert _one(_decide({1: 1.0}, existing=[a], hour=9)).text_night.day == D(1)
+
+
 def test_dismissed_reopened_by_a_stage_rise_keeps_the_normal_text():
     d = _spell(D(1), status="dismissed", stage="near")
     c = _one(_decide({1: -6.0}, existing=[d]))
@@ -434,6 +452,83 @@ def test_quiet_hours_any_imminent_night_of_the_chain_vibrates():
     assert _one(_decide(running=1.0, hour=3)).urgency == "vibrate"
 
 
-def test_close_flag_follows_lead_one():
-    assert _one(_decide({1: 1.0})).close
-    assert not _one(_decide({2: 1.0})).close
+def test_imminent_flag_is_lead_zero_or_lead_one_from_evening():
+    assert _one(_decide(running=1.0, hour=3)).imminent
+    assert _one(_decide({1: 1.0}, hour=18)).imminent
+    assert not _one(_decide({1: 1.0}, hour=17)).imminent
+    assert not _one(_decide({2: 1.0}, hour=20)).imminent
+
+
+# ── noches anunciadas: una helada que se mueve abre Alert nueva ───────
+
+
+def test_cold_moving_earlier_than_the_announced_night_opens_a_new_alert():
+    # Anunciada la noche de lead 4; el frío pasa a lead 2 y lead 4 se templa.
+    a = _spell(D(4), announced=[D(4)])
+    ev = _decide({2: 1.0}, existing=[a])
+    c = _one(ev)
+    assert c.alert_id is None and c.start == D(2) and c.urgency == "vibrate"
+    assert ev.resolve_ids == (a.alert_id,)
+
+
+def test_chain_still_containing_an_announced_night_and_nothing_earlier_keeps_the_alert():
+    a = _spell(D(4), announced=[D(4)])
+    assert _one(_decide({4: 1.0, 6: 1.0}, existing=[a])).alert_id == a.alert_id
+
+
+def test_earlier_near_night_joining_the_announced_one_opens_a_new_alert():
+    # Caso A de la revisión: anunciada lead 4; se suma lead 2 a la misma cadena.
+    a = _spell(D(4), announced=[D(4)])
+    ev = _decide({2: 1.0, 4: 1.0}, existing=[a])
+    assert _one(ev).alert_id is None and _one(ev).start == D(2)
+    assert ev.resolve_ids == (a.alert_id,)
+
+
+def test_cold_moving_later_than_the_announced_night_opens_a_new_alert():
+    # Caso C: anunciada lead 2; el frío pasa a lead 3 (dentro del hueco) y lead 2 se templa.
+    a = _spell(D(2), announced=[D(2)])
+    ev = _decide({3: 1.0}, existing=[a])
+    assert _one(ev).alert_id is None and ev.resolve_ids == (a.alert_id,)
+
+
+def test_announced_nights_already_passed_do_not_block_the_chain():
+    # La noche anunciada de hoy ya pasó (son las 12:00): sigue la cadena con la de mañana.
+    a = _spell(D(0), last=D(1), announced=[D(0), D(1)])
+    assert _one(_decide({1: 1.0}, running=1.0, existing=[a])).alert_id == a.alert_id
+
+
+def test_alert_never_announced_matches_as_before():
+    a = _spell(D(4), stage="far")
+    assert _one(_decide({2: 1.0}, existing=[a])).alert_id == a.alert_id
+
+
+def test_announced_nights_are_recorded_only_by_a_publish_that_pushes():
+    c = _one(_decide({2: 1.0, 3: 1.0}))  # id nuevo, vibrate: notifications empuja
+    assert c.announced == (D(2), D(3)) and c.announced_severity == "high"
+    assert _one(_decide({2: 1.0}, hour=23)).announced == ()   # silent
+    assert _one(_decide({6: 1.0})).announced == ()            # lejana
+    assert _one(_decide({2: 1.0}, muted=True)).announced == ()
+    # Misma severidad en una Alert activa: republicación deduplicada, no anuncia.
+    a = _spell(D(2), announced=[D(2)])
+    assert _one(_decide({2: 1.0, 3: 1.0}, existing=[a])).announced == (D(2),)
+    # Severidad mayor, o la Alert no activa (deduplicación liberada): anuncia.
+    c = _one(_decide({2: -6.0, 3: 1.0}, existing=[a]))
+    assert c.announced == (D(2), D(3)) and c.announced_severity == "critical"
+    r = _spell(D(2), status="resolved", announced=[D(2)])
+    assert _one(_decide({2: 1.0, 3: 1.0}, existing=[r])).announced == (D(2), D(3))
+
+
+def test_a_deduplicated_retry_drops_announced_nights_that_left_the_chain():
+    # El push pudo entregarse en este reintento: lo que ya no está en la cadena deja de contar.
+    a = _spell(D(2), last=D(4), announced=[D(2), D(4)])
+    assert _one(_decide({2: 1.0}, existing=[a])).announced == (D(2),)
+    passed = _spell(D(0), last=D(1), announced=[D(0), D(1)])
+    assert _one(_decide({1: 1.0}, existing=[passed])).announced == (D(0), D(1))  # D(0) ya pasó
+
+
+def test_new_chain_never_reuses_the_start_of_a_live_alert():
+    # La Alert nació en lead 2 (lejana), solo se anunció lead 4; vuelve el frío a lead 2 solo.
+    a = _spell(D(2), last=D(4), announced=[D(4)])
+    ev = _decide({2: 1.0}, existing=[a])
+    c = _one(ev)
+    assert c.alert_id is None and c.start != D(2) and ev.resolve_ids == (a.alert_id,)

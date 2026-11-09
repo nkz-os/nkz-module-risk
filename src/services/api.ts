@@ -75,7 +75,10 @@ export function useModuleApi() {
   });
 
   return {
-    getAlerts: () => client.get<{ alerts: AlertItem[]; count: number }>('/alerts'),
+    getAlerts: (status?: 'active' | 'resolved' | 'expired' | 'dismissed' | 'all') =>
+      client.get<{ alerts: AlertItem[]; count: number }>(
+        status ? `/alerts?status=${encodeURIComponent(status)}` : '/alerts',
+      ),
     dismissAlert: (id: string) =>
       client.post<{ id: string; status: string }>(`/alerts/${encodeURIComponent(id)}/dismiss`, {}),
     getFrostVibrate: (parcelId: string) =>

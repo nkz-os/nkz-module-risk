@@ -6,6 +6,7 @@ y TimescaleDB. Además, el estrés de cultivo (CropHealthAssessment de
 crop-health) se consume como una alerta de categoría `crop`.
 """
 import logging
+import sys
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional, Set
 
@@ -190,7 +191,7 @@ def _evaluate_frost_risk(
     orion, conn, settings, tenant_id, risk, existing, touched, now, parcel_filter,
 ) -> Dict[str, int]:
     """Aviso de helada por noche: una evaluación por parcela, aislada de las demás."""
-    counts = {"evaluated": 0, "errors": 0, "frost_no_data": 0}
+    counts = {"evaluated": 0, "errors": 0, "frost_no_data": 0, "frost_parcels": 0}
     breaker = frost_alerts.FrostBreaker()
     for entity in _get_entities(orion, risk["target_sdm_type"]):
         entity_id = entity.get("id")
@@ -199,6 +200,7 @@ def _evaluate_frost_risk(
         applicable = risk.get("applicable_crop_groups") or []
         if applicable and _parcel_crop_group(orion, entity) not in applicable:
             continue
+        counts["frost_parcels"] += 1
         try:
             outcome = frost_alerts.process_frost_parcel(
                 orion, conn, settings, tenant_id, risk, entity, existing, touched, now, breaker
@@ -234,9 +236,9 @@ def _evaluate_risks(
     settings = get_settings()
     catalog = _get_catalog(conn)
     if not catalog:
-        return {"evaluated": 0, "errors": 0, "frost_no_data": 0}
+        return {"evaluated": 0, "errors": 0, "frost_no_data": 0, "frost_parcels": 0}
 
-    evaluated = errors = frost_no_data = 0
+    evaluated = errors = frost_no_data = frost_parcels = 0
     now = datetime.now(timezone.utc)
     touched: Set[str] = set()
     with SyncOrionClient(tenant_id, base_url=settings.orion_ld_url, context_url=settings.context_url) as orion:
@@ -246,7 +248,7 @@ def _evaluate_risks(
             # Sin el estado previo no se puede respetar un descarte: no se publica
             # nada antes que reabrir alertas que el usuario cerró.
             logger.error("Alert lifecycle: no se pudo leer el estado previo (%s); se omite el tenant", e)
-            return {"evaluated": 0, "errors": 1, "frost_no_data": 0}
+            return {"evaluated": 0, "errors": 1, "frost_no_data": 0, "frost_parcels": 0}
 
         for risk in _frost_first(catalog):
             if risk.get("model_type") == "frost":
@@ -256,6 +258,7 @@ def _evaluate_risks(
                 evaluated += fc["evaluated"]
                 errors += fc["errors"]
                 frost_no_data += fc["frost_no_data"]
+                frost_parcels += fc["frost_parcels"]
                 continue
             model = RiskModelFactory.create_model(
                 risk["alert_type"], risk["category"], risk["model_config"], risk["model_type"]
@@ -338,7 +341,8 @@ def _evaluate_risks(
                 logger.error("Alert lifecycle sweep failed for %s: %s", tenant_id, e)
                 errors += 1
 
-    return {"evaluated": evaluated, "errors": errors, "frost_no_data": frost_no_data}
+    return {"evaluated": evaluated, "errors": errors, "frost_no_data": frost_no_data,
+            "frost_parcels": frost_parcels}
 
 
 def evaluate_risks_for_tenant(conn, tenant_id: str) -> Dict[str, int]:
@@ -351,10 +355,26 @@ def evaluate_risks_for_parcel(conn, tenant_id: str, parcel_id: str) -> Dict[str,
     return _evaluate_risks(conn, tenant_id, parcel_filter=parcel_id, include_crop_stress=False)
 
 
-def main() -> None:
-    """CLI del worker (modo batch): evalúa todos los tenants activos una vez."""
+def _frost_dark(tenant_id: str, result: Dict[str, int]) -> bool:
+    """Un tenant con parcelas de helada evaluadas y todas sin dato: nadie recibe avisos."""
+    parcels = result.get("frost_parcels", 0)
+    no_data = result.get("frost_no_data", 0)
+    if parcels > 0 and no_data >= parcels:
+        logger.error("frost_all_no_data tenant=%s parcels=%d no_data=%d", tenant_id, parcels, no_data)
+        return True
+    return False
+
+
+def main() -> int:
+    """CLI del worker (modo batch): evalúa todos los tenants activos una vez.
+
+    Devuelve 1 si algún tenant tuvo helada evaluada con todas las parcelas sin dato, para
+    que el CronJob salga como fallido y se vea; si no, 0. Las demás causas no cambian la
+    salida.
+    """
     from app.db import get_conn
 
+    dark = False
     conn = get_conn()
     try:
         with conn.cursor() as cur:
@@ -367,12 +387,14 @@ def main() -> None:
             try:
                 result = evaluate_risks_for_tenant(conn, tenant_id)
                 logger.info("tenant=%s result=%s", tenant_id, result)
+                dark = _frost_dark(tenant_id, result) or dark
             except Exception as e:
                 logger.error("tenant=%s failed: %s", tenant_id, e)
     finally:
         conn.close()
+    return 1 if dark else 0
 
 
 if __name__ == "__main__":
     logging.basicConfig(level=logging.INFO)
-    main()
+    sys.exit(main())

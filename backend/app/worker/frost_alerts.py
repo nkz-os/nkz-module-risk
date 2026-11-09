@@ -41,9 +41,11 @@ REASON_BREAKER_OPEN = "breaker_open"
 
 # Fallos seguidos de weather-api (transporte o 5xx) que abren el freno de un tenant.
 BREAKER_FAILURES = 3
-# Sin cambios, una Alert activa se reescribe como mucho cada estas horas, salvo que toque
-# vibrar con una noche a lead <= 1 (`ChainDecision.close`): reintento en cada pasada.
+# Sin cambios, una Alert activa se reescribe como mucho cada estas horas...
 REPUBLISH_HOURS = 6
+# ...y si toca vibrar, cada estas (reintento de un push fallido); en cada pasada mientras
+# alguna noche sea inminente (`ChainDecision.imminent`).
+VIBRATE_RETRY_HOURS = 3
 
 
 class FrostBreaker:
@@ -90,6 +92,29 @@ def _read_spell(info: Optional[Dict[str, Any]], alert_id: str) -> Optional[Dict[
 _LIVE = (STATUS_ACTIVE, STATUS_DISMISSED, STATUS_RESOLVED)
 
 
+def _read_dismissed_range(data: Dict[str, Any], alert_id: str) -> Optional[tuple]:
+    """Rango descartado guardado [inicio, fin]; ausente = None, ilegible = None (WARNING)."""
+    raw = data.get("dismissed_range")
+    if raw is None:
+        return None
+    try:
+        a, b = (date.fromisoformat(d) for d in raw)
+        return (a, b)
+    except (TypeError, ValueError) as e:
+        logger.warning("frost alert %s has an unreadable dismissed range (%s)", alert_id, e)
+        return None
+
+
+def _read_announced(data: Dict[str, Any], alert_id: str) -> tuple:
+    """Noches anunciadas guardadas; ausentes o ilegibles = nunca anunciada (WARNING)."""
+    raw = data.get("announced", [])
+    try:
+        return tuple(sorted({date.fromisoformat(d) for d in raw}))
+    except (TypeError, ValueError) as e:
+        logger.warning("frost alert %s has unreadable announced nights (%s)", alert_id, e)
+        return ()
+
+
 def _frost_alerts_of(existing: Dict[str, Dict[str, Any]], entity_id: str) -> Dict[str, Dict[str, Any]]:
     return {
         aid: info for aid, info in existing.items()
@@ -119,8 +144,14 @@ def _spells_of(mine: Dict[str, Dict[str, Any]]) -> List[ExistingSpell]:
         else:
             data = info.get("evaluation_data") or {}
             peak = data.get("peak_severity")
-            out.append(ExistingSpell(aid, status, spell["start"], spell["last_night"], spell["stage"],
-                                     peak if peak in SEVERITIES else None))
+            announced_severity = data.get("announced_severity")
+            out.append(ExistingSpell(
+                aid, status, spell["start"], spell["last_night"], spell["stage"],
+                peak if peak in SEVERITIES else None,
+                _read_announced(data, aid),
+                announced_severity if announced_severity in SEVERITIES else None,
+                _read_dismissed_range(data, aid),
+            ))
     return out
 
 
@@ -187,8 +218,10 @@ def _should_publish(
     last = lifecycle._parse(current.get("observed_at"))
     if last is None or now - last >= timedelta(hours=REPUBLISH_HOURS):
         return True
-    # Cerca de la noche, cada pasada reintenta la vibración (notifications deduplica).
-    return key["urgency"] == URGENCY_VIBRATE and chain.close
+    if key["urgency"] != URGENCY_VIBRATE:
+        return False
+    # Reintento de la vibración (notifications deduplica): cada pasada si es inminente.
+    return chain.imminent or now - last >= timedelta(hours=VIBRATE_RETRY_HOURS)
 
 
 def _evaluation_data(
@@ -204,6 +237,11 @@ def _evaluation_data(
         "publish_key": publish_key,
         "stage": chain.stage,
         "peak_severity": chain.severity,
+        "announced": [d.isoformat() for d in chain.announced],
+        "announced_severity": chain.announced_severity,
+        "dismissed_range": (
+            [d.isoformat() for d in chain.dismissed_range] if chain.dismissed_range else None
+        ),
         "next_night": nxt.day.isoformat(),
         "next_tmin_c": nxt.tmin_c,
         "next_lead": (nxt.day - today).days,

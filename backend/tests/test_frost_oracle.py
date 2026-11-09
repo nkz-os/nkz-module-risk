@@ -459,6 +459,26 @@ def test_a_parcel_can_hold_two_active_alerts_and_the_first_closing_leaves_the_se
     assert [listed_nights(a) for a in active(t.broker)] == [{late}]
 
 
+@pytest.mark.parametrize("one_row", [False, True])
+def test_frost_moving_earlier_than_the_announced_night_pushes_again_ahead_of_it(one_row):
+    # Mar 01/12 08:15: push por la noche del viernes 04/12. A las 16:15 el frío pasa a la
+    # noche del miércoles 02/12 y la del viernes se templa.
+    friday, wednesday = DAY0 + timedelta(days=4), DAY0 + timedelta(days=2)
+
+    def f(now):
+        return stable({wednesday: 1.0} if now >= START + timedelta(hours=16) else {friday: 1.0})(now)
+    t = drive(f, 24 * 3, start=START + timedelta(hours=8), one_row_per_channel=one_row)
+    bodies_ = [(d.at, d.body) for d in t.notifications.deliveries]
+    assert bodies_[0][1] == "Noche del viernes 04/12: puede bajar a 1 °C."
+    later = [(at, b) for at, b in bodies_[1:] if "02/12" in b or b == "Esta noche puede bajar a 1 °C."]
+    assert later, bodies_
+    at, _ = later[0]
+    night_start = datetime.combine(wednesday - timedelta(days=1), datetime.min.time(), timezone.utc)
+    assert at < night_start + timedelta(hours=18)
+    lead = (wednesday - at.date()).days
+    assert not quiet(at.hour) or lead == 0 or (lead == 1 and at.hour >= 18)
+
+
 # ── severidad: nunca baja mientras la Alert siga activa ──────────────
 
 
@@ -519,10 +539,21 @@ def test_dismissed_frost_bridged_to_a_later_one_still_warns_ahead_of_it():
     later = [d for d in t.notifications.deliveries if d.at > START + timedelta(hours=10)]
     night_start = datetime.combine(n2 - timedelta(days=1), datetime.min.time(), timezone.utc)
     assert later and later[0].at < night_start, [(d.at, d.body) for d in later]
-    d = later[0]
-    lead = (min(d.nights - {n1}) - d.at.date()).days
-    assert not quiet(d.at.hour) or lead == 0 or (lead == 1 and d.at.hour >= 18)
-    assert "03/12" not in d.body and "02/12" not in d.body  # no vuelve a nombrar la descartada
+    for d in later:  # ningún push posterior vuelve a nombrar la noche descartada (03/12)
+        named = _night_named(d)
+        assert named in (bridge, n2), (d.at, d.body)
+        lead = (named - d.at.date()).days
+        assert not quiet(d.at.hour) or lead == 0 or (lead == 1 and d.at.hour >= 18)
+
+
+def _night_named(d: "Delivery") -> date:
+    """La noche D que nombra el texto de un push (las tres formas del texto en español)."""
+    if d.body.startswith("Esta madrugada"):
+        return d.at.date()
+    if d.body.startswith("Esta noche"):
+        return d.at.date() + timedelta(days=1)
+    day, month = d.body.split(" ")[3].rstrip(":").split("/")
+    return date(d.at.year, int(month), int(day)) + timedelta(days=1)
 
 
 def test_dismissed_frost_stays_silent_while_its_chain_keeps_to_its_nights():
@@ -570,8 +601,18 @@ def test_c_hovering_never_closes_the_alert():
 # ── propiedad con oráculo independiente ──────────────────────────────
 
 
+GAP = 2  # D12: dos noches de helada a 2 días o menos son la misma racha
+
+
 class Oracle:
-    """(a) y (b) a partir de lo publicado y entregado, sin saber nada de cadenas."""
+    """(a) y (b) a partir de lo publicado y entregado, sin saber nada de cadenas.
+
+    (a) por noche: una noche de helada en su ventana inminente cuenta como avisada si un
+    push entregado (de cualquier Alert, en cualquier momento) listaba esa noche entre sus
+    noches, o si listaba una noche anterior de la misma racha (enlazada por noches de
+    helada a GAP días o menos) que fue helada de verdad, es decir, estuvo en riesgo en su
+    propia ventana. Un push sobre una noche que luego no heló no avisa de otra noche.
+    """
 
     def __init__(self):
         self.credited: Set[str] = set()      # Alert con push entregado desde su último cierre
@@ -581,8 +622,37 @@ class Oracle:
         self.closed_since: Set[tuple] = set()
         self.windows_failed_out: Set[date] = set()
         self.windows_covered: Set[date] = set()
-        self.covered_by_extension: Set[date] = set()
+        self.real: Set[date] = set()          # noches en riesgo en su propia ventana
+        self.named: Set[date] = set()         # noches listadas en algún push entregado
+        self.acknowledged: Set[date] = set()  # noches que el usuario descartó
+        self.covered_by_racha: Set[date] = set()  # avisada solo por una noche anterior real
         self.repeats_across_close = 0
+
+    def dismissed(self, entity: dict) -> None:
+        """El usuario descarta: da por vistas las noches que el aviso le mostró (las que
+        lista ahora y las que le llegaron en un push de ese aviso) y lo que hay entre ellas.
+        Descartar cierra el aviso en notifications: libera la deduplicación."""
+        aid = entity["id"]
+        nights = listed_nights(entity) | self.pushed_nights.pop(aid, set())
+        self.credited.discard(aid)
+        self.closed_since |= {k for k in self.delivered if k[0] == aid}
+        if nights:
+            lo, hi = min(nights), max(nights)
+            self.acknowledged |= {lo + timedelta(days=i) for i in range((hi - lo).days + 1)}
+
+    def _linked(self, night: date, pushed: Set[date]) -> bool:
+        for m in pushed:
+            if m >= night or m not in self.real:
+                continue
+            cur = m
+            while (night - cur).days > GAP:
+                nxt = [d for d in self.real if cur < d < night and (d - cur).days <= GAP]
+                if not nxt:
+                    break
+                cur = max(nxt)
+            if (night - cur).days <= GAP:
+                return True
+        return False
 
     def observe(self, now, values, broker, deliveries, failed) -> None:
         current: Dict[str, Set[date]] = {}
@@ -605,24 +675,27 @@ class Oracle:
             self.closed_since.discard(key)
             self.credited.add(d.alert_id)
             self.pushed_nights.setdefault(d.alert_id, set()).update(d.nights)
+            self.named |= d.nights
 
         if not oracle_near_complete(values, now.hour):
             return
         failed_ids = {key[0] for _, key in failed}
-        for lead in oracle_at_risk(values, now.hour):
-            if not imminent_window(lead, now.hour):
+        window = [now.date() + timedelta(days=lead) for lead in oracle_at_risk(values, now.hour)
+                  if imminent_window(lead, now.hour)]
+        self.real |= set(window)
+        for day in window:
+            if day in self.acknowledged:
                 continue
-            day = now.date() + timedelta(days=lead)
             listing = [aid for aid, nights in current.items() if day in nights]
-            pushed = [aid for aid in listing if aid in self.credited]
-            if pushed:
+            named = day in self.named
+            if named or self._linked(day, self.named):
                 self.windows_covered.add(day)
-                if not any(day in self.pushed_nights.get(aid, ()) for aid in pushed):
-                    self.covered_by_extension.add(day)
+                if not named:
+                    self.covered_by_racha.add(day)
             elif any(aid in failed_ids for aid in listing):
                 self.windows_failed_out.add(day)  # lo intentó esta hora y falló la entrega
             else:
-                self.violations.append(("missed", day.isoformat(), now.isoformat(), lead, listing))
+                self.violations.append(("missed", day.isoformat(), now.isoformat(), listing))
 
 
 def _random_forecast(rng: random.Random, days: int):
@@ -668,10 +741,11 @@ class SimResult:
 
 
 def _simulate(seed: int, days: int = 10, failure_rate: float = 0.3,
-              one_row_per_channel: bool = False) -> SimResult:
+              one_row_per_channel: bool = False, dismiss_rate: float = 0.005) -> SimResult:
     rng = random.Random(seed)
     base = _random_forecast(rng, days)
     fail_rng = random.Random(seed + 1)
+    dismiss_rng = random.Random(seed + 2)
     oracle = Oracle()
     bad: List[tuple] = []
     seen = {"values": None, "status": {}, "deliveries": 0, "failed": 0}
@@ -705,6 +779,12 @@ def _simulate(seed: int, days: int = 10, failure_rate: float = 0.3,
         )
         seen["deliveries"] = len(notifications.deliveries)
         seen["failed"] = len(notifications.failed_attempts)
+        # El usuario descarta de vez en cuando un aviso activo.
+        live = sorted(k for k, v in broker.e.items() if v["status"]["value"] == "active")
+        if live and dismiss_rng.random() < dismiss_rate:
+            aid = dismiss_rng.choice(live)
+            oracle.dismissed(broker.e[aid])
+            broker.append_entity_attrs(aid, {"status": {"type": "Property", "value": "dismissed"}})
         seen["status"] = {k: v["status"]["value"] for k, v in broker.e.items()}
 
     t = drive(forecast, days * 24, fail=lambda: fail_rng.random() < failure_rate,

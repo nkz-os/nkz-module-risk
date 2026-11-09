@@ -53,7 +53,7 @@ export const ParcelAlertsSlot: React.FC<{ className?: string }> = ({ className }
     let cancelled = false;
     (async () => {
       try {
-        const [a, c] = await Promise.all([api.getAlerts(), api.getCatalog()]);
+        const [a, c] = await Promise.all([api.getAlerts('active'), api.getCatalog()]);
         if (cancelled) return;
         setCatalog(new Map(c.map((x) => [x.alert_type, x])));
         setAlerts((a.alerts ?? []).filter((x) => matchesEntity(x.refEntity, selectedEntityId)));
